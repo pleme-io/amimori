@@ -159,7 +159,7 @@ impl StateEngine {
                 }
                 existing.last_seen = now;
                 let snapshot = existing.clone();
-                drop(existing);
+                drop(existing); // release DashMap lock before async emit/db
 
                 if changed {
                     self.emit(Change::HostUpdated(snapshot.clone())).await;
@@ -321,7 +321,8 @@ impl StateEngine {
     /// Hosts remain in the database for historical querying — only the live
     /// in-memory view is reset so the new network starts fresh.
     async fn clear_hosts_on_interface(&self, interface: &str) -> anyhow::Result<usize> {
-        let to_remove: Vec<String> = self
+        // Collect keys first — can't hold DashMap iterator across await points.
+        let removed: Vec<String> = self
             .state
             .hosts
             .iter()
@@ -329,14 +330,12 @@ impl StateEngine {
             .map(|e| e.key().clone())
             .collect();
 
-        let count = to_remove.len();
-        for mac in &to_remove {
+        for mac in &removed {
             self.state.hosts.remove(mac);
             self.emit(Change::HostRemoved { mac: mac.clone() }).await;
-            // NOTE: intentionally NOT calling db.remove_host() — history persists
         }
 
-        Ok(count)
+        Ok(removed.len())
     }
 
     pub async fn apply_wifi_scan(&self, networks: &[WifiInfo]) -> anyhow::Result<()> {
@@ -411,11 +410,25 @@ impl StateEngine {
             }
 
             if let Some(existing_ref) = self.state.hosts.get(&mac) {
-                let new_services: Vec<_> = nmap_host
+                // Detect added services (in nmap but not existing)
+                let added_services: Vec<_> = nmap_host
                     .services
                     .iter()
                     .filter(|svc| {
                         !existing_ref
+                            .services
+                            .iter()
+                            .any(|s| s.port == svc.port && s.protocol == svc.protocol)
+                    })
+                    .cloned()
+                    .collect();
+
+                // Detect removed services (in existing but not in nmap)
+                let removed_services: Vec<_> = existing_ref
+                    .services
+                    .iter()
+                    .filter(|svc| {
+                        !nmap_host
                             .services
                             .iter()
                             .any(|s| s.port == svc.port && s.protocol == svc.protocol)
@@ -439,8 +452,16 @@ impl StateEngine {
                         existing.os_hint.clone_from(&nmap_host.os_hint);
                         changed = true;
                     }
-                    for svc in &new_services {
+                    for svc in &added_services {
                         existing.services.push(svc.clone());
+                        changed = true;
+                    }
+                    if !removed_services.is_empty() {
+                        existing.services.retain(|s| {
+                            !removed_services
+                                .iter()
+                                .any(|r| r.port == s.port && r.protocol == s.protocol)
+                        });
                         changed = true;
                     }
                     existing.last_seen = now;
@@ -454,11 +475,19 @@ impl StateEngine {
                     None
                 };
 
-                for svc in &new_services {
+                for svc in &added_services {
                     self.emit(Change::ServiceChanged {
                         mac: mac.clone(),
                         service: svc.clone(),
                         change_type: ChangeType::Added,
+                    })
+                    .await;
+                }
+                for svc in &removed_services {
+                    self.emit(Change::ServiceChanged {
+                        mac: mac.clone(),
+                        service: svc.clone(),
+                        change_type: ChangeType::Removed,
                     })
                     .await;
                 }
@@ -559,8 +588,9 @@ impl StateEngine {
     /// No-op if no bus is configured (tests, one-shot scan mode).
     fn publish_trigger(&self, event: TriggerEvent) {
         if let Some(ref bus) = self.trigger_bus {
-            // Ignore send errors — means no subscribers are listening (yet or anymore)
-            let _ = bus.send(event);
+            if bus.send(event).is_err() {
+                tracing::debug!("trigger bus closed — no collector actors listening");
+            }
         }
     }
 
@@ -1495,5 +1525,125 @@ mod tests {
             .unwrap();
 
         assert_eq!(engine.network_id_for("en0"), "10.0.0.1|255.255.255.0");
+    }
+
+    // ── Service change detection ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn nmap_detects_new_service() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Seed a host via ARP
+        engine
+            .apply_arp_results(&[arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.1", "en0")])
+            .await
+            .unwrap();
+        assert!(engine.state.hosts.get("aa:bb:cc:dd:ee:ff").unwrap().services.is_empty());
+
+        // nmap discovers SSH
+        let nmap = crate::model::NmapHost {
+            ip: "10.0.0.1".parse().unwrap(),
+            mac: Some("aa:bb:cc:dd:ee:ff".into()),
+            hostname: None,
+            os_hint: None,
+            services: vec![crate::model::ServiceInfo {
+                port: 22,
+                protocol: "tcp".into(),
+                name: "ssh".into(),
+                version: "OpenSSH 9".into(),
+                state: "open".into(),
+            }],
+        };
+        engine.apply_nmap_results("en0", &[nmap]).await.unwrap();
+
+        let host = engine.state.hosts.get("aa:bb:cc:dd:ee:ff").unwrap();
+        assert_eq!(host.services.len(), 1);
+        assert_eq!(host.services[0].port, 22);
+
+        // Check service_changed event was emitted
+        let events = engine.events_since(0).await;
+        assert!(events.iter().any(|e| matches!(
+            &e.change,
+            Change::ServiceChanged { change_type: ChangeType::Added, .. }
+        )));
+    }
+
+    #[tokio::test]
+    async fn nmap_detects_removed_service() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Seed host with SSH service
+        let host = HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: String::new(),
+            addresses: vec!["10.0.0.1".parse().unwrap()],
+            hostname: None,
+            os_hint: None,
+            services: vec![
+                crate::model::ServiceInfo {
+                    port: 22,
+                    protocol: "tcp".into(),
+                    name: "ssh".into(),
+                    version: "OpenSSH 9".into(),
+                    state: "open".into(),
+                },
+                crate::model::ServiceInfo {
+                    port: 80,
+                    protocol: "tcp".into(),
+                    name: "http".into(),
+                    version: String::new(),
+                    state: "open".into(),
+                },
+            ],
+            interface: "en0".into(),
+            network_id: String::new(),
+            first_seen: Utc::now(),
+            last_seen: Utc::now(),
+        };
+        engine.state.hosts.insert(host.mac.clone(), host);
+
+        // nmap now only sees SSH (port 80 closed)
+        let nmap = crate::model::NmapHost {
+            ip: "10.0.0.1".parse().unwrap(),
+            mac: Some("aa:bb:cc:dd:ee:ff".into()),
+            hostname: None,
+            os_hint: None,
+            services: vec![crate::model::ServiceInfo {
+                port: 22,
+                protocol: "tcp".into(),
+                name: "ssh".into(),
+                version: "OpenSSH 9".into(),
+                state: "open".into(),
+            }],
+        };
+        engine.apply_nmap_results("en0", &[nmap]).await.unwrap();
+
+        // Port 80 should be gone
+        let host = engine.state.hosts.get("aa:bb:cc:dd:ee:ff").unwrap();
+        assert_eq!(host.services.len(), 1);
+        assert_eq!(host.services[0].port, 22);
+
+        // Check service_changed(removed) event was emitted
+        let events = engine.events_since(0).await;
+        assert!(events.iter().any(|e| matches!(
+            &e.change,
+            Change::ServiceChanged { service, change_type: ChangeType::Removed, .. }
+            if service.port == 80
+        )));
+    }
+
+    #[tokio::test]
+    async fn nmap_invalid_mac_skipped() {
+        let engine = make_engine(FilterConfig::default());
+
+        let nmap = crate::model::NmapHost {
+            ip: "10.0.0.1".parse().unwrap(),
+            mac: Some("zz:yy:xx:ww:vv:uu".into()),
+            hostname: None,
+            os_hint: None,
+            services: vec![],
+        };
+        engine.apply_nmap_results("en0", &[nmap]).await.unwrap();
+        assert!(engine.state.hosts.is_empty());
     }
 }

@@ -145,7 +145,7 @@ impl Collector for NmapCollector {
                                 count = hosts.len(),
                                 "nmap scan complete"
                             );
-                            hosts
+                            Ok(hosts)
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -154,7 +154,7 @@ impl Collector for NmapCollector {
                                 error = %e,
                                 "nmap scan failed"
                             );
-                            Vec::new()
+                            Err(())
                         }
                     }
                 }
@@ -162,7 +162,12 @@ impl Collector for NmapCollector {
             .collect();
 
         let results = futures::future::join_all(scan_futures).await;
-        let all_hosts: Vec<NmapHost> = results.into_iter().flatten().collect();
+        let total = results.len();
+        let failed = results.iter().filter(|r| r.is_err()).count();
+        if failed > 0 {
+            tracing::warn!(failed, total, "partial nmap scan results");
+        }
+        let all_hosts: Vec<NmapHost> = results.into_iter().filter_map(Result::ok).flatten().collect();
 
         Ok(CollectorOutput::Nmap {
             interface: primary_iface,
