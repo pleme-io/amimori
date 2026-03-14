@@ -444,13 +444,26 @@ impl StateEngine {
                         existing.addresses.push(nmap_host.ip);
                         changed = true;
                     }
-                    if nmap_host.hostname.is_some() && existing.hostname.is_none() {
-                        existing.hostname.clone_from(&nmap_host.hostname);
-                        changed = true;
+                    // Progressive enrichment: accept richer data, never overwrite
+                    // with empty. This lets ARP provide hostnames early and nmap
+                    // upgrade them with FQDNs later.
+                    if let Some(ref new_name) = nmap_host.hostname {
+                        let dominated = existing.hostname.as_ref().map_or(true, |old| {
+                            old.len() < new_name.len()
+                        });
+                        if dominated {
+                            existing.hostname = Some(new_name.clone());
+                            changed = true;
+                        }
                     }
-                    if nmap_host.os_hint.is_some() && existing.os_hint.is_none() {
-                        existing.os_hint.clone_from(&nmap_host.os_hint);
-                        changed = true;
+                    if let Some(ref new_os) = nmap_host.os_hint {
+                        let dominated = existing.os_hint.as_ref().map_or(true, |old| {
+                            old.len() < new_os.len()
+                        });
+                        if dominated {
+                            existing.os_hint = Some(new_os.clone());
+                            changed = true;
+                        }
                     }
                     for svc in &added_services {
                         existing.services.push(svc.clone());

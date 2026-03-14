@@ -38,6 +38,9 @@ with lib; let
           bin = "${cfg.collectors.nmap.package}/bin/nmap";
           timeout = cfg.collectors.nmap.timeout;
           service_detection = cfg.collectors.nmap.serviceDetection;
+          os_detection = cfg.collectors.nmap.osDetection;
+          top_ports = cfg.collectors.nmap.topPorts;
+          version_intensity = cfg.collectors.nmap.versionIntensity;
           subnets = cfg.collectors.nmap.subnets;
           max_failures = cfg.collectors.nmap.maxFailures;
         };

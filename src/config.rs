@@ -214,6 +214,21 @@ pub struct NmapCollectorConfig {
     #[serde(default)]
     pub service_detection: bool,
 
+    /// Enable OS fingerprinting (-O). Requires root. Progressive: only
+    /// targets hosts without an os_hint.
+    #[serde(default)]
+    pub os_detection: bool,
+
+    /// Number of top ports to scan (nmap --top-ports N). Higher = deeper
+    /// coverage but slower scans. Default 200.
+    #[serde(default = "default_200_u16")]
+    pub top_ports: u16,
+
+    /// Version detection intensity (0-9, default 7). Higher = more probes
+    /// sent per service, slower but more accurate fingerprints.
+    #[serde(default = "default_7_u8")]
+    pub version_intensity: u8,
+
     /// Subnets to scan. Empty = auto-derive from active interfaces.
     #[serde(default)]
     pub subnets: Vec<String>,
@@ -239,6 +254,9 @@ impl Default for NmapCollectorConfig {
             bin: default_nmap_bin(),
             timeout: 120,
             service_detection: false,
+            os_detection: false,
+            top_ports: 200,
+            version_intensity: 7,
             subnets: Vec::new(),
             max_failures: 3,
             reactive: true,
@@ -413,6 +431,12 @@ const fn default_120() -> u64 {
 }
 fn default_nmap_bin() -> String {
     "nmap".to_string()
+}
+const fn default_200_u16() -> u16 {
+    200
+}
+const fn default_7_u8() -> u8 {
+    7
 }
 fn default_db_path() -> String {
     dirs::data_dir()

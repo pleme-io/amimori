@@ -38,6 +38,9 @@ with lib; let
           bin = "${cfg.collectors.nmap.package}/bin/nmap";
           timeout = cfg.collectors.nmap.timeout;
           service_detection = cfg.collectors.nmap.serviceDetection;
+          os_detection = cfg.collectors.nmap.osDetection;
+          top_ports = cfg.collectors.nmap.topPorts;
+          version_intensity = cfg.collectors.nmap.versionIntensity;
           subnets = cfg.collectors.nmap.subnets;
           max_failures = cfg.collectors.nmap.maxFailures;
         };
@@ -100,10 +103,13 @@ in {
       };
       nmap = {
         enable = mkOption { type = types.bool; default = true; };
-        interval = mkOption { type = types.int; default = 60; };
+        interval = mkOption { type = types.int; default = 60; description = "Scan interval in seconds"; };
         package = mkOption { type = types.package; default = pkgs.nmap; };
         timeout = mkOption { type = types.int; default = 120; };
-        serviceDetection = mkOption { type = types.bool; default = false; };
+        serviceDetection = mkOption { type = types.bool; default = true; description = "Service version detection (-sV)"; };
+        osDetection = mkOption { type = types.bool; default = true; description = "OS fingerprinting (-O). Requires root."; };
+        topPorts = mkOption { type = types.int; default = 200; description = "Number of top ports to scan"; };
+        versionIntensity = mkOption { type = types.int; default = 7; description = "Version detection intensity (0-9)"; };
         subnets = mkOption { type = types.listOf types.str; default = []; };
         maxFailures = mkOption { type = types.int; default = 3; };
       };

@@ -16,6 +16,9 @@ use crate::state::StateEngine;
 pub struct NmapCollector {
     nmap_bin: String,
     service_detection: bool,
+    os_detection: bool,
+    top_ports: u16,
+    version_intensity: u8,
     interval: Duration,
     timeout: Duration,
     max_failures: u32,
@@ -28,6 +31,9 @@ impl NmapCollector {
         Self {
             nmap_bin: config.collectors.nmap.bin.clone(),
             service_detection: config.collectors.nmap.service_detection,
+            os_detection: config.collectors.nmap.os_detection,
+            top_ports: config.collectors.nmap.top_ports,
+            version_intensity: config.collectors.nmap.version_intensity,
             interval: Duration::from_secs(config.collectors.nmap.interval),
             timeout: Duration::from_secs(config.collectors.nmap.timeout),
             max_failures: config.collectors.nmap.max_failures,
@@ -71,11 +77,21 @@ impl NmapCollector {
     }
 
     async fn scan_subnet(&self, subnet: &str) -> anyhow::Result<Vec<NmapHost>> {
-        let args: Vec<&str> = if self.service_detection {
-            vec!["-sV", "--top-ports", "100", "-oX", "-", subnet]
+        let mut args: Vec<String> = Vec::new();
+
+        if self.service_detection {
+            args.push("-sV".into());
+            args.push(format!("--version-intensity={}", self.version_intensity));
+            args.push("--top-ports".into());
+            args.push(self.top_ports.to_string());
         } else {
-            vec!["-sn", "-oX", "-", subnet]
-        };
+            args.push("-sn".into());
+        }
+        if self.os_detection {
+            args.push("-O".into());
+            args.push("--osscan-guess".into());
+        }
+        args.extend(["-oX".into(), "-".into(), subnet.into()]);
 
         let result = tokio::time::timeout(
             self.timeout,
