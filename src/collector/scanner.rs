@@ -259,6 +259,7 @@ fn parse_nmap_xml(xml: &str) -> Vec<NmapHost> {
                                     name: String::new(),
                                     version: String::new(),
                                     state: String::new(),
+                                    banner: String::new(),
                                 });
                             }
                         }

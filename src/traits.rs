@@ -280,6 +280,7 @@ pub mod mocks {
                 hostname: None,
                 os_hint: None,
                 services: vec![],
+                fingerprints: vec![],
                 interface: "en0".into(),
                 network_id: String::new(),
                 first_seen: Utc::now(),

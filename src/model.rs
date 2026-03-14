@@ -156,6 +156,71 @@ impl InterfaceKind {
     }
 }
 
+// ── Structured fingerprints (ADR-012) ──────────────────────────────────────
+
+/// Source of a fingerprint observation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum FingerprintSource {
+    Arp,
+    Nmap,
+    Mdns,
+    Tls,
+    Banner,
+    Passive,
+    Manual,
+}
+
+impl fmt::Display for FingerprintSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Arp => f.write_str("arp"),
+            Self::Nmap => f.write_str("nmap"),
+            Self::Mdns => f.write_str("mdns"),
+            Self::Tls => f.write_str("tls"),
+            Self::Banner => f.write_str("banner"),
+            Self::Passive => f.write_str("passive"),
+            Self::Manual => f.write_str("manual"),
+        }
+    }
+}
+
+/// A single observed attribute about a host, with provenance and confidence.
+///
+/// Inspired by runZero's `fp.<category>.<key>` schema. Multiple fingerprints
+/// can exist for the same (category, key) from different sources — the state
+/// engine merges them by highest confidence, ties broken by recency.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Fingerprint {
+    pub source: FingerprintSource,
+    /// Category: "os", "hw", "sw", "net", "tls", "svc"
+    pub category: String,
+    /// Dot-separated key within category: "os.name", "hw.vendor", "tls.cn"
+    pub key: String,
+    /// The observed value
+    pub value: String,
+    /// Confidence 0.0 (guess) to 1.0 (certain)
+    pub confidence: f32,
+    /// When this fingerprint was observed
+    pub observed_at: DateTime<Utc>,
+}
+
+impl Fingerprint {
+    /// Composite key for merging: "os.name", "hw.vendor", etc.
+    pub fn full_key(&self) -> String {
+        format!("{}.{}", self.category, self.key)
+    }
+
+    /// Returns true if `other` should replace `self` (higher confidence, or
+    /// same confidence but more recent).
+    pub fn dominated_by(&self, other: &Self) -> bool {
+        other.confidence > self.confidence
+            || (other.confidence == self.confidence && other.observed_at > self.observed_at)
+    }
+}
+
+// ── Host info ──────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HostInfo {
     pub mac: String,
@@ -164,9 +229,13 @@ pub struct HostInfo {
     pub hostname: Option<String>,
     pub os_hint: Option<String>,
     pub services: Vec<ServiceInfo>,
+    /// Structured fingerprints — typed observations with provenance and confidence.
+    /// Multiple entries per (category, key) from different sources are allowed;
+    /// the state engine merges by highest confidence.
+    #[serde(default)]
+    pub fingerprints: Vec<Fingerprint>,
     pub interface: String,
     /// Identifies which logical network this host was seen on (gateway|subnet).
-    /// Empty for hosts discovered before network tracking was added.
     pub network_id: String,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
@@ -177,6 +246,27 @@ impl HostInfo {
     pub fn is_stale(&self, cutoff: DateTime<Utc>) -> bool {
         self.last_seen < cutoff
     }
+
+    /// Merge a fingerprint. Higher confidence replaces lower; ties broken by recency.
+    /// Returns true if the fingerprint was new or replaced an existing one.
+    pub fn merge_fingerprint(&mut self, fp: Fingerprint) -> bool {
+        let full_key = fp.full_key();
+        if let Some(existing) = self.fingerprints.iter_mut().find(|f| f.full_key() == full_key) {
+            if existing.dominated_by(&fp) {
+                *existing = fp;
+                return true;
+            }
+            return false;
+        }
+        self.fingerprints.push(fp);
+        true
+    }
+
+    /// Get the best fingerprint for a key, or None.
+    pub fn fingerprint(&self, category: &str, key: &str) -> Option<&Fingerprint> {
+        let full = format!("{category}.{key}");
+        self.fingerprints.iter().find(|f| f.full_key() == full)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -186,6 +276,9 @@ pub struct ServiceInfo {
     pub name: String,
     pub version: String,
     pub state: String,
+    /// Raw banner text (first 1024 bytes of service response)
+    #[serde(default)]
+    pub banner: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -574,6 +667,7 @@ mod tests {
             hostname: None,
             os_hint: None,
             services: vec![],
+            fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
             first_seen: Utc::now() - chrono::Duration::hours(48),
@@ -592,6 +686,7 @@ mod tests {
             hostname: None,
             os_hint: None,
             services: vec![],
+            fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
             first_seen: Utc::now() - chrono::Duration::hours(1),
@@ -612,6 +707,7 @@ mod tests {
             hostname: None,
             os_hint: None,
             services: vec![],
+            fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
             first_seen: Utc::now(),
@@ -634,7 +730,7 @@ mod tests {
             protocol: "tcp".into(),
             name: "ssh".into(),
             version: String::new(),
-            state: "open".into(),
+            state: "open".into(), banner: String::new(),
         };
         assert_eq!(
             Change::ServiceChanged {

@@ -335,7 +335,9 @@ mod tests {
                 name: "ssh".into(),
                 version: "OpenSSH 9".into(),
                 state: "open".into(),
+                banner: String::new(),
             }],
+            fingerprints: vec![],
             interface: "en0".into(),
             network_id: "10.0.0.1|255.255.255.0".into(),
             first_seen: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
@@ -473,7 +475,7 @@ mod tests {
             protocol: "tcp".into(),
             name: "https".into(),
             version: "".into(),
-            state: "open".into(),
+            state: "open".into(), banner: String::new(),
         };
         let p = svc_to_proto(&s);
         assert_eq!(p.port, 443);
@@ -542,7 +544,7 @@ mod tests {
                     protocol: "tcp".into(),
                     name: "http".into(),
                     version: "".into(),
-                    state: "open".into(),
+                    state: "open".into(), banner: String::new(),
                 },
                 change_type: ChangeType::Added,
             },

@@ -417,6 +417,7 @@ fn row_to_host_info(
             name: s.name.clone(),
             version: s.version.clone(),
             state: s.state.clone(),
+            banner: String::new(), // banners not persisted in current schema
         })
         .collect();
 
@@ -427,6 +428,7 @@ fn row_to_host_info(
         hostname: row.hostname.clone(),
         os_hint: row.os_hint.clone(),
         services: svcs,
+        fingerprints: Vec::new(), // fingerprints rebuilt from live collectors
         interface: row.interface.clone(),
         network_id: row.network_id.clone(),
         first_seen: row.first_seen.with_timezone(&Utc),

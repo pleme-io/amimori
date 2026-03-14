@@ -10,8 +10,8 @@ use crate::config::{Config, FilterConfig};
 use crate::db::Database;
 use crate::event_bus::TriggerEvent;
 use crate::model::{
-    ArpEntry, Change, ChangeType, DeltaEvent, HostInfo, InterfaceInfo, NetworkState, NmapHost,
-    WifiInfo, normalize_mac,
+    ArpEntry, Change, ChangeType, DeltaEvent, Fingerprint, FingerprintSource, HostInfo,
+    InterfaceInfo, NetworkState, NmapHost, WifiInfo, normalize_mac,
 };
 use crate::traits::{OuiVendorLookup, StorageBackend, VendorLookup};
 
@@ -183,6 +183,17 @@ impl StateEngine {
                 }
 
                 let network_id = self.network_id_for(&entry.interface);
+                let mut fingerprints = Vec::new();
+                if !vendor.is_empty() {
+                    fingerprints.push(Fingerprint {
+                        source: FingerprintSource::Arp,
+                        category: "hw".into(),
+                        key: "vendor".into(),
+                        value: vendor.clone(),
+                        confidence: 0.9, // OUI lookup is high confidence
+                        observed_at: now,
+                    });
+                }
                 let host = HostInfo {
                     mac: mac.clone(),
                     vendor,
@@ -190,6 +201,7 @@ impl StateEngine {
                     hostname: entry.hostname.clone(),
                     os_hint: None,
                     services: Vec::new(),
+                    fingerprints,
                     interface: entry.interface.clone(),
                     network_id,
                     first_seen: now,
@@ -481,6 +493,15 @@ impl StateEngine {
                             existing.os_hint = Some(new_os.clone());
                             changed = true;
                         }
+                        // Structured fingerprint for OS detection
+                        changed |= existing.merge_fingerprint(Fingerprint {
+                            source: FingerprintSource::Nmap,
+                            category: "os".into(),
+                            key: "name".into(),
+                            value: new_os.clone(),
+                            confidence: 0.7, // nmap OS guess ~70% typical
+                            observed_at: now,
+                        });
                     }
                     for svc in &added_services {
                         existing.services.push(svc.clone());
@@ -531,6 +552,27 @@ impl StateEngine {
                     continue;
                 }
 
+                let mut fingerprints = Vec::new();
+                if !vendor.is_empty() {
+                    fingerprints.push(Fingerprint {
+                        source: FingerprintSource::Nmap,
+                        category: "hw".into(),
+                        key: "vendor".into(),
+                        value: vendor.clone(),
+                        confidence: 0.9,
+                        observed_at: now,
+                    });
+                }
+                if let Some(ref os) = nmap_host.os_hint {
+                    fingerprints.push(Fingerprint {
+                        source: FingerprintSource::Nmap,
+                        category: "os".into(),
+                        key: "name".into(),
+                        value: os.clone(),
+                        confidence: 0.7,
+                        observed_at: now,
+                    });
+                }
                 let host = HostInfo {
                     mac: mac.clone(),
                     vendor,
@@ -538,6 +580,7 @@ impl StateEngine {
                     hostname: nmap_host.hostname.clone(),
                     os_hint: nmap_host.os_hint.clone(),
                     services: nmap_host.services.clone(),
+                    fingerprints,
                     interface: interface.to_string(),
                     network_id: self.network_id_for(interface),
                     first_seen: now,
@@ -1052,7 +1095,7 @@ mod tests {
                 protocol: "tcp".into(),
                 name: "ssh".into(),
                 version: "OpenSSH 8.9".into(),
-                state: "open".into(),
+                state: "open".into(), banner: String::new(),
             }],
         };
         engine
@@ -1106,6 +1149,7 @@ mod tests {
             hostname: None,
             os_hint: None,
             services: vec![],
+            fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
             first_seen: Utc::now() - chrono::Duration::hours(48),
@@ -1131,6 +1175,7 @@ mod tests {
             hostname: None,
             os_hint: None,
             services: vec![],
+            fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
             first_seen: Utc::now(),
@@ -1591,7 +1636,7 @@ mod tests {
                 protocol: "tcp".into(),
                 name: "ssh".into(),
                 version: "OpenSSH 9".into(),
-                state: "open".into(),
+                state: "open".into(), banner: String::new(),
             }],
         };
         engine.apply_nmap_results("en0", &[nmap]).await.unwrap();
@@ -1625,16 +1670,17 @@ mod tests {
                     protocol: "tcp".into(),
                     name: "ssh".into(),
                     version: "OpenSSH 9".into(),
-                    state: "open".into(),
+                    state: "open".into(), banner: String::new(),
                 },
                 crate::model::ServiceInfo {
                     port: 80,
                     protocol: "tcp".into(),
                     name: "http".into(),
                     version: String::new(),
-                    state: "open".into(),
+                    state: "open".into(), banner: String::new(),
                 },
             ],
+            fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
             first_seen: Utc::now(),
@@ -1653,7 +1699,7 @@ mod tests {
                 protocol: "tcp".into(),
                 name: "ssh".into(),
                 version: "OpenSSH 9".into(),
-                state: "open".into(),
+                state: "open".into(), banner: String::new(),
             }],
         };
         engine.apply_nmap_results("en0", &[nmap]).await.unwrap();
