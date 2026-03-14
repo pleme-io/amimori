@@ -58,6 +58,46 @@ enum Cli {
         #[arg(long)]
         json: bool,
     },
+    /// List discovered hosts
+    Hosts {
+        /// Filter by vendor name (case-insensitive substring)
+        #[arg(long)]
+        vendor: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show detailed host info by MAC or IP
+    Host {
+        /// MAC or IP address
+        address: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List network interfaces
+    Interfaces,
+    /// List WiFi networks
+    Wifi,
+    /// Show network topology
+    Topology,
+    /// Export host inventory
+    Export {
+        /// Format: csv or json (default: json)
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
+    /// Send Wake-on-LAN packet
+    Wake {
+        /// MAC address of host to wake
+        mac: String,
+    },
+    /// Show recent network changes
+    Changes {
+        /// Max events to show
+        #[arg(long, default_value = "20")]
+        limit: u32,
+    },
 }
 
 impl Default for Cli {
@@ -196,9 +236,177 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        Cli::Hosts { vendor, json } => {
+            let mut client = grpc_client().await;
+            let resp = client.get_snapshot(grpc::proto::SnapshotRequest::default()).await?;
+            let mut hosts = resp.into_inner().hosts;
+            if let Some(ref v) = vendor {
+                let v = v.to_lowercase();
+                hosts.retain(|h| h.vendor.to_lowercase().contains(&v));
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&hosts.iter().map(|h| serde_json::json!({
+                    "mac": h.mac, "vendor": h.vendor, "hostname": h.hostname,
+                    "ipv4": h.ipv4, "outlier_score": h.outlier_score,
+                })).collect::<Vec<_>>())?);
+            } else {
+                println!("{} hosts", hosts.len());
+                for h in &hosts {
+                    let name = if h.hostname.is_empty() { &h.vendor } else { &h.hostname };
+                    println!("  {} | {} | {:?}", h.mac, name, h.ipv4);
+                }
+            }
+        }
+        Cli::Host { address, json } => {
+            let mut client = grpc_client().await;
+            match client.get_host(grpc::proto::HostRequest { address }).await {
+                Ok(resp) => {
+                    let h = resp.into_inner();
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                            "mac": h.mac, "vendor": h.vendor, "hostname": h.hostname,
+                            "ipv4": h.ipv4, "ipv6": h.ipv6, "os": h.os_hint,
+                            "interface": h.interface, "outlier_score": h.outlier_score,
+                            "services": h.services.iter().map(|s| serde_json::json!({
+                                "port": s.port, "protocol": s.protocol, "name": s.name,
+                                "version": s.version, "state": s.state,
+                            })).collect::<Vec<_>>(),
+                            "fingerprints": h.fingerprints.iter().map(|f| serde_json::json!({
+                                "source": f.source, "category": f.category,
+                                "key": f.key, "value": f.value, "confidence": f.confidence,
+                            })).collect::<Vec<_>>(),
+                        }))?);
+                    } else {
+                        println!("MAC: {}", h.mac);
+                        println!("Vendor: {}", h.vendor);
+                        println!("Hostname: {}", h.hostname);
+                        println!("IPv4: {:?}", h.ipv4);
+                        println!("OS: {}", h.os_hint);
+                        println!("Outlier: {:.1}/5.0", h.outlier_score);
+                        for s in &h.services {
+                            println!("  {}/{} {} {} [{}]", s.port, s.protocol, s.name, s.version, s.state);
+                        }
+                        for f in &h.fingerprints {
+                            println!("  {}.{} = {} ({} {:.0}%)", f.category, f.key, f.value, f.source, f.confidence * 100.0);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("host not found: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Cli::Interfaces => {
+            let mut client = grpc_client().await;
+            let resp = client.list_interfaces(grpc::proto::Empty {}).await?;
+            for i in &resp.into_inner().interfaces {
+                let status = if i.is_up { "UP" } else { "DOWN" };
+                println!("  {} [{}] {status} ipv4={:?} gw={} dns={:?}", i.name, i.kind, i.ipv4, i.gateway, i.dns);
+            }
+        }
+        Cli::Wifi => {
+            let mut client = grpc_client().await;
+            let resp = client.list_wifi_networks(grpc::proto::Empty {}).await?;
+            for w in &resp.into_inner().networks {
+                let snr = w.rssi - w.noise;
+                println!("  {} ch{} {} rssi={} snr={} {}", w.ssid, w.channel, w.band, w.rssi, snr, w.security);
+            }
+        }
+        Cli::Topology => {
+            let mut client = grpc_client().await;
+            let resp = client.get_snapshot(grpc::proto::SnapshotRequest::default()).await?;
+            let s = resp.into_inner();
+            let hosts: Vec<_> = s.hosts.iter().map(|h| crate::model::HostInfo {
+                mac: h.mac.clone(), vendor: h.vendor.clone(),
+                addresses: h.ipv4.iter().chain(h.ipv6.iter()).filter_map(|s| s.parse().ok()).collect(),
+                hostname: None, os_hint: None, services: vec![], fingerprints: vec![],
+                interface: h.interface.clone(), network_id: String::new(),
+                first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+            }).collect();
+            let interfaces: Vec<_> = s.interfaces.iter().map(|i| crate::model::InterfaceInfo {
+                name: i.name.clone(), mac: i.mac.clone(),
+                ipv4: i.ipv4.iter().filter_map(|s| s.parse().ok()).collect(),
+                ipv6: i.ipv6.iter().filter_map(|s| s.parse().ok()).collect(),
+                gateway: i.gateway.clone(), subnet: i.subnet.clone(),
+                is_up: i.is_up, kind: crate::model::InterfaceKind::from_name(&i.name),
+                dns: i.dns.clone(),
+            }).collect();
+            print!("{}", crate::topology::format_topology(&crate::topology::build_topology(&hosts, &interfaces)));
+        }
+        Cli::Export { format } => {
+            let mut client = grpc_client().await;
+            let resp = client.get_snapshot(grpc::proto::SnapshotRequest::default()).await?;
+            let hosts: Vec<_> = resp.into_inner().hosts.iter().map(|h| crate::model::HostInfo {
+                mac: h.mac.clone(), vendor: h.vendor.clone(),
+                addresses: h.ipv4.iter().chain(h.ipv6.iter()).filter_map(|s| s.parse().ok()).collect(),
+                hostname: if h.hostname.is_empty() { None } else { Some(h.hostname.clone()) },
+                os_hint: if h.os_hint.is_empty() { None } else { Some(h.os_hint.clone()) },
+                services: h.services.iter().map(|s| crate::model::ServiceInfo {
+                    port: s.port as u16, protocol: s.protocol.clone(),
+                    name: s.name.clone(), version: s.version.clone(),
+                    state: s.state.clone(), banner: String::new(),
+                }).collect(),
+                fingerprints: vec![], interface: h.interface.clone(),
+                network_id: String::new(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+            }).collect();
+            match format.as_str() {
+                "csv" => print!("{}", crate::export::to_csv(&hosts)),
+                _ => print!("{}", crate::export::to_json(&hosts)),
+            }
+        }
+        Cli::Wake { mac } => {
+            let mac_bytes: Vec<u8> = mac.split(':').filter_map(|s| u8::from_str_radix(s, 16).ok()).collect();
+            if mac_bytes.len() != 6 {
+                eprintln!("invalid MAC address: {mac}");
+                std::process::exit(1);
+            }
+            let mut arr = [0u8; 6];
+            arr.copy_from_slice(&mac_bytes);
+            match wake_on_lan::MagicPacket::new(&arr).send() {
+                Ok(()) => println!("WoL sent to {mac}"),
+                Err(e) => { eprintln!("WoL failed: {e}"); std::process::exit(1); }
+            }
+        }
+        Cli::Changes { limit } => {
+            let mut client = grpc_client().await;
+            let resp = client.get_changes(grpc::proto::ChangesRequest {
+                since_sequence: 0, limit,
+            }).await?;
+            let r = resp.into_inner();
+            if r.events.is_empty() {
+                println!("No changes (sequence: {})", r.current_sequence);
+            } else {
+                println!("{} events (sequence: {})", r.events.len(), r.current_sequence);
+                for e in &r.events {
+                    let desc = match &e.change {
+                        Some(grpc::proto::delta_update::Change::HostAdded(h)) => format!("+ host {} {}", h.mac, h.vendor),
+                        Some(grpc::proto::delta_update::Change::HostRemoved(h)) => format!("- host {}", h.mac),
+                        Some(grpc::proto::delta_update::Change::HostUpdated(h)) => format!("~ host {} {}", h.mac, h.vendor),
+                        Some(grpc::proto::delta_update::Change::WifiUpdated(w)) => format!("~ wifi rssi={}", w.rssi),
+                        Some(grpc::proto::delta_update::Change::WifiAdded(w)) => format!("+ wifi {}", w.ssid),
+                        Some(grpc::proto::delta_update::Change::WifiRemoved(w)) => format!("- wifi {}", w.bssid),
+                        _ => "other".into(),
+                    };
+                    println!("  [{:>6}] {desc}", e.sequence);
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+async fn grpc_client() -> grpc::proto::network_profiler_client::NetworkProfilerClient<tonic::transport::Channel> {
+    let grpc_url = std::env::var("AMIMORI_GRPC_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
+    match grpc::proto::network_profiler_client::NetworkProfilerClient::connect(grpc_url.clone()).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("amimori: not running ({grpc_url}: {e})");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn init_daemon_logging(cfg: &config::Config) {
