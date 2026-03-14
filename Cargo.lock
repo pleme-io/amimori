@@ -66,6 +66,7 @@ dependencies = [
  "sea-query",
  "serde",
  "serde_json",
+ "serde_yaml",
  "shellexpand",
  "shikumi",
  "ssdp-client",

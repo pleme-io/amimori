@@ -98,6 +98,30 @@ pub struct CollectorConfig {
 
     #[serde(default)]
     pub nmap: NmapCollectorConfig,
+
+    #[serde(default)]
+    pub banner: BannerCollectorConfig,
+
+    #[serde(default)]
+    pub tls: TlsCollectorConfig,
+
+    #[serde(default)]
+    pub mdns: MdnsCollectorConfig,
+
+    #[serde(default)]
+    pub passive: PassiveCollectorConfig,
+
+    #[serde(default)]
+    pub ssdp: SsdpCollectorConfig,
+
+    #[serde(default)]
+    pub lldp: LldpCollectorConfig,
+
+    #[serde(default)]
+    pub netbios: NetbiosCollectorConfig,
+
+    #[serde(default)]
+    pub dns: DnsCollectorConfig,
 }
 
 impl Default for CollectorConfig {
@@ -108,6 +132,14 @@ impl Default for CollectorConfig {
             interface: InterfaceCollectorConfig::default(),
             wifi: WifiCollectorConfig::default(),
             nmap: NmapCollectorConfig::default(),
+            banner: BannerCollectorConfig::default(),
+            tls: TlsCollectorConfig::default(),
+            mdns: MdnsCollectorConfig::default(),
+            passive: PassiveCollectorConfig::default(),
+            ssdp: SsdpCollectorConfig::default(),
+            lldp: LldpCollectorConfig::default(),
+            netbios: NetbiosCollectorConfig::default(),
+            dns: DnsCollectorConfig::default(),
         }
     }
 }
@@ -268,6 +300,141 @@ impl Default for NmapCollectorConfig {
             reactive: true,
             reactive_cooldown: 5,
         }
+    }
+}
+
+// ── New collector configs ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BannerCollectorConfig {
+    pub enable: bool,
+    pub interval: u64,
+    pub max_failures: u32,
+    pub connect_timeout_ms: u64,
+    pub read_timeout_ms: u64,
+    pub max_banner_bytes: usize,
+    pub max_concurrent: usize,
+}
+
+impl Default for BannerCollectorConfig {
+    fn default() -> Self {
+        Self { enable: true, interval: 120, max_failures: 5,
+            connect_timeout_ms: 3000, read_timeout_ms: 5000,
+            max_banner_bytes: 1024, max_concurrent: 16 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TlsCollectorConfig {
+    pub enable: bool,
+    pub interval: u64,
+    pub max_failures: u32,
+    pub connect_timeout_ms: u64,
+    pub max_concurrent: usize,
+    pub ports: Vec<u16>,
+}
+
+impl Default for TlsCollectorConfig {
+    fn default() -> Self {
+        Self { enable: true, interval: 180, max_failures: 5,
+            connect_timeout_ms: 5000, max_concurrent: 8,
+            ports: vec![443, 8443, 993, 995, 465, 636, 989, 990, 5061, 6697] }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MdnsCollectorConfig {
+    pub enable: bool,
+    pub interval: u64,
+    pub max_failures: u32,
+    pub listen_duration_secs: u64,
+}
+
+impl Default for MdnsCollectorConfig {
+    fn default() -> Self {
+        Self { enable: true, interval: 30, max_failures: 5, listen_duration_secs: 10 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PassiveCollectorConfig {
+    pub enable: bool,
+    pub interval: u64,
+    pub max_failures: u32,
+    pub capture_duration_secs: u64,
+}
+
+impl Default for PassiveCollectorConfig {
+    fn default() -> Self {
+        Self { enable: true, interval: 30, max_failures: 5, capture_duration_secs: 15 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SsdpCollectorConfig {
+    pub enable: bool,
+    pub interval: u64,
+    pub max_failures: u32,
+    pub search_timeout_secs: u64,
+}
+
+impl Default for SsdpCollectorConfig {
+    fn default() -> Self {
+        Self { enable: true, interval: 60, max_failures: 5, search_timeout_secs: 5 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LldpCollectorConfig {
+    pub enable: bool,
+    pub interval: u64,
+    pub max_failures: u32,
+    pub capture_duration_secs: u64,
+}
+
+impl Default for LldpCollectorConfig {
+    fn default() -> Self {
+        Self { enable: true, interval: 120, max_failures: 5, capture_duration_secs: 65 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetbiosCollectorConfig {
+    pub enable: bool,
+    pub interval: u64,
+    pub max_failures: u32,
+    pub connect_timeout_ms: u64,
+    pub read_timeout_ms: u64,
+    pub max_targets_per_cycle: usize,
+    pub max_concurrent: usize,
+}
+
+impl Default for NetbiosCollectorConfig {
+    fn default() -> Self {
+        Self { enable: true, interval: 120, max_failures: 5,
+            connect_timeout_ms: 2000, read_timeout_ms: 3000,
+            max_targets_per_cycle: 32, max_concurrent: 8 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsCollectorConfig {
+    pub enable: bool,
+    pub interval: u64,
+    pub max_failures: u32,
+}
+
+impl Default for DnsCollectorConfig {
+    fn default() -> Self {
+        Self { enable: true, interval: 120, max_failures: 5 }
     }
 }
 

@@ -92,6 +92,8 @@ enum Cli {
         /// MAC address of host to wake
         mac: String,
     },
+    /// Show current configuration (defaults + overrides)
+    Config,
     /// Show recent network changes
     Changes {
         /// Max events to show
@@ -343,6 +345,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(()) => println!("WoL sent to {mac}"),
                 Err(e) => { eprintln!("WoL failed: {e}"); std::process::exit(1); }
             }
+        }
+        Cli::Config => {
+            let cfg = config::Config::discover().unwrap_or_default();
+            println!("{}", serde_yaml::to_string(&cfg)?);
         }
         Cli::Changes { limit } => {
             let mut client = grpc_client().await;
