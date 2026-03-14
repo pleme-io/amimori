@@ -91,6 +91,16 @@ message Host {
   string interface = 8;
   google.protobuf.Timestamp first_seen = 9;
   google.protobuf.Timestamp last_seen = 10;
+  float outlier_score = 11;           // 0.0-5.0 anomaly score
+  repeated Fingerprint fingerprints = 12;
+}
+
+message Fingerprint {
+  string source = 1;      // arp, nmap, mdns, tls, banner, passive, manual
+  string category = 2;    // os, hw, sw, net, tls, mdns, svc
+  string key = 3;          // name, vendor, model, cn, etc.
+  string value = 4;
+  float confidence = 5;   // 0.0 - 1.0
 }
 
 message Service {

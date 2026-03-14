@@ -299,6 +299,54 @@ impl HostInfo {
         let full = format!("{category}.{key}");
         self.fingerprints.iter().find(|f| f.full_key() == full)
     }
+
+    /// Compute an outlier score (0.0-5.0) based on how unusual this host is
+    /// relative to network norms. Higher = more unusual = worth investigating.
+    ///
+    /// Factors:
+    /// - Unknown vendor (no OUI match) → +1.0
+    /// - High service count (>10 open ports) → +1.0
+    /// - Locally-administered MAC (randomized) → +0.5
+    /// - No hostname after multiple scans → +0.5
+    /// - Has intrusive services (telnet, ftp, rsh) → +1.0
+    /// - Recent first_seen (appeared < 1h ago) → +1.0
+    pub fn outlier_score(&self) -> f32 {
+        let mut score = 0.0f32;
+
+        if self.vendor.is_empty() {
+            score += 1.0;
+        }
+
+        if self.services.len() > 10 {
+            score += 1.0;
+        }
+
+        // Locally-administered MAC: bit 1 of first octet set
+        if let Some(first) = self.mac.split(':').next() {
+            if let Ok(byte) = u8::from_str_radix(first, 16) {
+                if byte & 0x02 != 0 {
+                    score += 0.5;
+                }
+            }
+        }
+
+        if self.hostname.is_none() && self.last_seen - self.first_seen > chrono::Duration::minutes(10) {
+            score += 0.5;
+        }
+
+        // Risky services
+        const RISKY_SERVICES: &[&str] = &["telnet", "ftp", "rsh", "rlogin", "vnc", "rdp"];
+        if self.services.iter().any(|s| RISKY_SERVICES.contains(&s.name.as_str())) {
+            score += 1.0;
+        }
+
+        // Recently appeared
+        if Utc::now() - self.first_seen < chrono::Duration::hours(1) {
+            score += 1.0;
+        }
+
+        score.min(5.0)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -773,6 +821,133 @@ mod tests {
             .to_string(),
             "service_changed(aa:bb:cc:dd:ee:ff:22)"
         );
+    }
+
+    // ── Outlier scoring ────────────────────────────────────────────────
+
+    fn make_host_for_outlier(vendor: &str, services: Vec<ServiceInfo>) -> HostInfo {
+        HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: vendor.into(),
+            addresses: vec!["10.0.0.1".parse().unwrap()],
+            hostname: Some("test".into()),
+            os_hint: None,
+            services,
+            fingerprints: vec![],
+            interface: "en0".into(),
+            network_id: String::new(),
+            first_seen: Utc::now() - chrono::Duration::hours(24),
+            last_seen: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn outlier_score_normal_host() {
+        let host = make_host_for_outlier("Apple Inc", vec![]);
+        assert!(host.outlier_score() < 1.0);
+    }
+
+    #[test]
+    fn outlier_score_no_vendor() {
+        let host = make_host_for_outlier("", vec![]);
+        assert!(host.outlier_score() >= 1.0);
+    }
+
+    #[test]
+    fn outlier_score_risky_services() {
+        let host = make_host_for_outlier("SomeVendor", vec![
+            ServiceInfo {
+                port: 23,
+                protocol: "tcp".into(),
+                name: "telnet".into(),
+                version: String::new(),
+                state: "open".into(),
+                banner: String::new(),
+            },
+        ]);
+        assert!(host.outlier_score() >= 1.0);
+    }
+
+    #[test]
+    fn outlier_score_capped_at_5() {
+        let mut host = make_host_for_outlier("", (0..15).map(|i| ServiceInfo {
+            port: i,
+            protocol: "tcp".into(),
+            name: "telnet".into(),
+            version: String::new(),
+            state: "open".into(),
+            banner: String::new(),
+        }).collect());
+        host.hostname = None;
+        host.first_seen = Utc::now();
+        host.mac = "02:00:00:00:00:01".into(); // locally administered
+        assert!(host.outlier_score() <= 5.0);
+    }
+
+    // ── Fingerprint merging ──────────────────────────────────────────
+
+    #[test]
+    fn merge_fingerprint_new() {
+        let mut host = make_host_for_outlier("Apple", vec![]);
+        let fp = Fingerprint {
+            source: FingerprintSource::Nmap,
+            category: "os".into(),
+            key: "name".into(),
+            value: "macOS".into(),
+            confidence: 0.7,
+            observed_at: Utc::now(),
+        };
+        assert!(host.merge_fingerprint(fp));
+        assert_eq!(host.fingerprints.len(), 1);
+    }
+
+    #[test]
+    fn merge_fingerprint_higher_confidence_wins() {
+        let mut host = make_host_for_outlier("Apple", vec![]);
+        let low = Fingerprint {
+            source: FingerprintSource::Arp,
+            category: "os".into(),
+            key: "name".into(),
+            value: "Linux".into(),
+            confidence: 0.3,
+            observed_at: Utc::now(),
+        };
+        let high = Fingerprint {
+            source: FingerprintSource::Nmap,
+            category: "os".into(),
+            key: "name".into(),
+            value: "macOS".into(),
+            confidence: 0.9,
+            observed_at: Utc::now(),
+        };
+        host.merge_fingerprint(low);
+        host.merge_fingerprint(high);
+        assert_eq!(host.fingerprints.len(), 1);
+        assert_eq!(host.fingerprints[0].value, "macOS");
+    }
+
+    #[test]
+    fn merge_fingerprint_lower_confidence_rejected() {
+        let mut host = make_host_for_outlier("Apple", vec![]);
+        let high = Fingerprint {
+            source: FingerprintSource::Nmap,
+            category: "os".into(),
+            key: "name".into(),
+            value: "macOS".into(),
+            confidence: 0.9,
+            observed_at: Utc::now(),
+        };
+        let low = Fingerprint {
+            source: FingerprintSource::Arp,
+            category: "os".into(),
+            key: "name".into(),
+            value: "Linux".into(),
+            confidence: 0.3,
+            observed_at: Utc::now(),
+        };
+        host.merge_fingerprint(high);
+        assert!(!host.merge_fingerprint(low));
+        assert_eq!(host.fingerprints[0].value, "macOS");
     }
 
     // ── Serde round-trips ──────────────────────────────────────────────

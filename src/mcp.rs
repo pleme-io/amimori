@@ -307,7 +307,7 @@ fn format_hosts(hosts: &[proto::Host]) -> String {
 }
 
 fn format_host_detail(h: &proto::Host) -> String {
-    let mut out = String::with_capacity(512);
+    let mut out = String::with_capacity(1024);
     let _ = writeln!(out, "MAC: {}", h.mac);
     let _ = writeln!(out, "Vendor: {}", h.vendor);
     let _ = writeln!(out, "Hostname: {}", h.hostname);
@@ -315,12 +315,23 @@ fn format_host_detail(h: &proto::Host) -> String {
     let _ = writeln!(out, "IPv6: {:?}", h.ipv6);
     let _ = writeln!(out, "OS: {}", h.os_hint);
     let _ = writeln!(out, "Interface: {}", h.interface);
+    let _ = writeln!(out, "Outlier Score: {:.1}/5.0", h.outlier_score);
     if !h.services.is_empty() {
         let _ = writeln!(out, "Services:");
         for s in &h.services {
             let _ = writeln!(
                 out, "  {}/{} {} {} [{}]",
                 s.port, s.protocol, s.name, s.version, s.state,
+            );
+        }
+    }
+    if !h.fingerprints.is_empty() {
+        let _ = writeln!(out, "Fingerprints:");
+        for fp in &h.fingerprints {
+            let _ = writeln!(
+                out, "  {}.{} = {} ({} {:.0}%)",
+                fp.category, fp.key, fp.value, fp.source,
+                fp.confidence * 100.0,
             );
         }
     }
@@ -430,6 +441,7 @@ mod tests {
             interface: "en0".into(),
             first_seen: None,
             last_seen: None,
+            ..Default::default()
         }
     }
 

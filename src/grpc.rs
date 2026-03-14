@@ -216,6 +216,18 @@ fn host_to_proto(h: &HostInfo) -> Host {
         interface: h.interface.clone(),
         first_seen: Some(chrono_to_proto(h.first_seen)),
         last_seen: Some(chrono_to_proto(h.last_seen)),
+        outlier_score: h.outlier_score(),
+        fingerprints: h.fingerprints.iter().map(fp_to_proto).collect(),
+    }
+}
+
+fn fp_to_proto(fp: &crate::model::Fingerprint) -> proto::Fingerprint {
+    proto::Fingerprint {
+        source: fp.source.to_string(),
+        category: fp.category.clone(),
+        key: fp.key.clone(),
+        value: fp.value.clone(),
+        confidence: fp.confidence,
     }
 }
 
