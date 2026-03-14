@@ -43,6 +43,79 @@ impl CommandRunner for SystemCommandRunner {
     }
 }
 
+// ── TCP connection ────────────────────────────────────────────────────────
+
+/// Abstraction over TCP connections. Allows mocking network I/O in tests.
+#[async_trait::async_trait]
+pub trait TcpConnector: Send + Sync {
+    /// Connect to addr, return raw bytes read (up to limit).
+    async fn connect_and_read(
+        &self,
+        addr: &str,
+        timeout: std::time::Duration,
+        send: Option<&[u8]>,
+        max_read: usize,
+    ) -> anyhow::Result<Vec<u8>>;
+}
+
+/// Real TCP connector using tokio::net::TcpStream.
+pub struct SystemTcpConnector;
+
+#[async_trait::async_trait]
+impl TcpConnector for SystemTcpConnector {
+    async fn connect_and_read(
+        &self,
+        addr: &str,
+        timeout: std::time::Duration,
+        send: Option<&[u8]>,
+        max_read: usize,
+    ) -> anyhow::Result<Vec<u8>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let socket_addr: std::net::SocketAddr = addr.parse()?;
+        let mut stream = tokio::time::timeout(timeout, TcpStream::connect(socket_addr))
+            .await
+            .map_err(|_| anyhow::anyhow!("connect timeout"))??;
+
+        if let Some(data) = send {
+            stream.write_all(data).await?;
+        }
+
+        let mut buf = vec![0u8; max_read];
+        let n = tokio::time::timeout(timeout, stream.read(&mut buf))
+            .await
+            .map_err(|_| anyhow::anyhow!("read timeout"))??;
+
+        buf.truncate(n);
+        Ok(buf)
+    }
+}
+
+// ── Packet capture ────────────────────────────────────────────────────────
+
+/// Abstraction over raw packet capture. Allows mocking for arp_scan,
+/// passive fingerprinting, and LLDP/CDP collectors.
+///
+/// Real implementation uses pnet::datalink. Mock returns pre-recorded packets.
+#[async_trait::async_trait]
+pub trait PacketCapture: Send + Sync {
+    /// Capture packets for `duration`, return raw Ethernet frames.
+    async fn capture(
+        &self,
+        interface: &str,
+        duration: std::time::Duration,
+    ) -> anyhow::Result<Vec<Vec<u8>>>;
+}
+
+/// Real implementation using pnet datalink (requires root).
+pub struct SystemPacketCapture;
+
+// Note: Real implementation lives in collector modules (arp_scan, passive, lldp)
+// because pnet::datalink::channel is blocking and platform-specific.
+// This trait enables mock-based testing of the parsing logic that
+// consumes captured packets.
+
 // ── Vendor lookup ──────────────────────────────────────────────────────────
 
 /// MAC address → vendor name lookup.
@@ -142,6 +215,40 @@ pub mod mocks {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no mock response for {name}"))
+        }
+    }
+
+    /// Mock TCP connector that returns pre-configured responses per address.
+    pub struct MockTcpConnector {
+        responses: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl MockTcpConnector {
+        pub fn new() -> Self {
+            Self {
+                responses: Mutex::new(HashMap::new()),
+            }
+        }
+
+        pub fn set_response(&self, addr: &str, data: Vec<u8>) {
+            self.responses.lock().unwrap().insert(addr.to_string(), data);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TcpConnector for MockTcpConnector {
+        async fn connect_and_read(
+            &self,
+            addr: &str,
+            _timeout: std::time::Duration,
+            _send: Option<&[u8]>,
+            _max_read: usize,
+        ) -> anyhow::Result<Vec<u8>> {
+            let responses = self.responses.lock().unwrap();
+            responses
+                .get(addr)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no mock response for {addr}"))
         }
     }
 
@@ -347,6 +454,27 @@ pub mod mocks {
         fn mock_vendor_lookup_returns_empty_for_unknown() {
             let lookup = MockVendorLookup::empty();
             assert_eq!(lookup.lookup("aa:bb:cc:dd:ee:ff"), "");
+        }
+
+        #[tokio::test]
+        async fn mock_tcp_connector_returns_configured() {
+            let tcp = MockTcpConnector::new();
+            tcp.set_response("10.0.0.1:22", b"SSH-2.0-OpenSSH_9.6\r\n".to_vec());
+
+            let result = tcp.connect_and_read(
+                "10.0.0.1:22",
+                std::time::Duration::from_secs(1),
+                None,
+                1024,
+            ).await.unwrap();
+
+            assert_eq!(String::from_utf8_lossy(&result), "SSH-2.0-OpenSSH_9.6\r\n");
+        }
+
+        #[tokio::test]
+        async fn mock_tcp_connector_errors_on_unknown() {
+            let tcp = MockTcpConnector::new();
+            assert!(tcp.connect_and_read("10.0.0.1:80", std::time::Duration::from_secs(1), None, 1024).await.is_err());
         }
 
         #[tokio::test]
