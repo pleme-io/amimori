@@ -52,6 +52,9 @@ impl Default for Cli {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install rustls crypto provider before any TLS usage (reqwest, tonic, etc.)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = if std::env::args().len() <= 1 {
         Cli::Mcp
     } else {
