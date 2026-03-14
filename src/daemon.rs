@@ -51,7 +51,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     // ARP collector — reactive on interface/network changes
     if config.collectors.arp.enable {
-        match tokio::process::Command::new("arp")
+        match tokio::process::Command::new("/usr/sbin/arp")
             .arg("-a")
             .output()
             .await

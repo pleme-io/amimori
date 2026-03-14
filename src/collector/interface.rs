@@ -107,8 +107,10 @@ fn build_interface_info(
 }
 
 /// Run `netstat -rn` and parse gateways.
+/// Uses absolute path — netstat lives at /usr/sbin which may not be in
+/// the daemon's restricted PATH (launchd only includes nix store paths).
 async fn parse_gateways() -> HashMap<String, String> {
-    let Ok(output) = tokio::process::Command::new("netstat")
+    let Ok(output) = tokio::process::Command::new("/usr/sbin/netstat")
         .args(["-rn"])
         .output()
         .await
@@ -121,8 +123,9 @@ async fn parse_gateways() -> HashMap<String, String> {
 }
 
 /// Run `scutil --dns` and parse DNS servers.
+/// Uses absolute path — scutil lives at /usr/sbin.
 async fn parse_dns_servers() -> HashMap<String, Vec<String>> {
-    let Ok(output) = tokio::process::Command::new("scutil")
+    let Ok(output) = tokio::process::Command::new("/usr/sbin/scutil")
         .args(["--dns"])
         .output()
         .await

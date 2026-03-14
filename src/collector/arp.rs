@@ -37,7 +37,7 @@ impl Collector for ArpCollector {
     }
 
     async fn collect(&self) -> anyhow::Result<CollectorOutput> {
-        let output = tokio::process::Command::new("arp")
+        let output = tokio::process::Command::new("/usr/sbin/arp")
             .arg("-a")
             .output()
             .await?;
