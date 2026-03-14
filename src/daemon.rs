@@ -159,6 +159,33 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     ));
     tracing::info!("passive TCP fingerprinting enabled");
 
+    // Active ARP scanning — discovers ALL hosts on the subnet (L2, unfirewallable).
+    // Safety level 2 (discovery). Requires root.
+    actors.push((
+        Box::new(collector::arp_scan::ArpScanCollector::new(&config, Arc::clone(&engine))),
+        ActorConfig::reactive(
+            vec![TriggerKind::NetworkChanged],
+            config.collectors.arp.reactive_cooldown,
+        ),
+    ));
+    tracing::info!("active ARP scanner enabled");
+
+    // Reverse DNS — PTR lookups for all discovered IPs.
+    // Safety level 2 (discovery, DNS queries).
+    actors.push((
+        Box::new(collector::dns::DnsCollector::new(&config, Arc::clone(&engine))),
+        ActorConfig::interval_only(),
+    ));
+    tracing::info!("reverse DNS enabled");
+
+    // UPnP/SSDP — discover smart TVs, IoT devices, gaming consoles.
+    // Safety level 2 (discovery, M-SEARCH multicast).
+    actors.push((
+        Box::new(collector::ssdp::SsdpCollector::new(&config, Arc::clone(&engine))),
+        ActorConfig::interval_only(),
+    ));
+    tracing::info!("UPnP/SSDP discovery enabled");
+
     if actors.is_empty() {
         anyhow::bail!(
             "no collector actors could be initialized — check config and tool availability"

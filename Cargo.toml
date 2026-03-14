@@ -23,8 +23,12 @@ prost-types = "0.13"
 # Network
 network-interface = "2"
 mdns-sd = "0.18"
-pnet = "0.35"          # Raw packet capture (BPF on macOS, AF_PACKET on Linux)
-etherparse = "0.16"    # Zero-copy packet parsing
+pnet = "0.35"               # Raw packet capture (BPF on macOS, AF_PACKET on Linux)
+etherparse = "0.16"          # Zero-copy packet parsing
+# hickory-resolver removed — using system `host` command via platform::system_bin
+# to avoid API instability in hickory 0.25
+ssdp-client = "2"            # UPnP/SSDP discovery
+wake-on-lan = "0.2"          # Wake-on-LAN magic packets
 
 # Storage (Sea stack)
 sea-orm = { version = "1", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-chrono"] }
@@ -52,12 +56,14 @@ tracing-appender = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 chrono = { version = "0.4", features = ["serde"] }
 mac_oui = { version = "0.4", features = ["with-db"] }
 async-trait = "0.1"
 dirs = "6"
 shellexpand = "3"
 thiserror = "2"
+url = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-wlan = "0.3"

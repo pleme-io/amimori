@@ -194,7 +194,7 @@ impl StateEngine {
                         observed_at: now,
                     });
                 }
-                let host = HostInfo {
+                let mut host = HostInfo {
                     mac: mac.clone(),
                     vendor,
                     addresses: vec![entry.ip],
@@ -208,6 +208,10 @@ impl StateEngine {
                     last_seen: now,
                 };
 
+                // Post-enrichment: classify host (VM/container/cloud)
+                for class_fp in crate::enrichment::derive_classification(&host) {
+                    host.merge_fingerprint(class_fp);
+                }
                 self.state.insert_host(mac, host.clone());
                 self.emit(Change::HostAdded(host.clone())).await;
                 self.db.upsert_host(&host).await?;

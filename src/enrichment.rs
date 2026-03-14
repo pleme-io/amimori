@@ -168,6 +168,150 @@ pub fn correlation_score(a: &HostInfo, b: &HostInfo) -> f32 {
     score.min(1.0)
 }
 
+// ── Host Classification (roadmap items 3.2, 3.3) ──────────────────────────
+
+/// Classify a host as physical, VM, container, or cloud based on MAC prefix,
+/// open ports, and reverse DNS patterns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostClass {
+    Physical,
+    Vm(VmPlatform),
+    Container(ContainerPlatform),
+    Cloud(CloudProvider),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VmPlatform {
+    VMware,
+    HyperV,
+    VirtualBox,
+    KvmQemu,
+    Xen,
+    Parallels,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerPlatform {
+    Docker,
+    Kubernetes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudProvider {
+    Aws,
+    Gcp,
+    Azure,
+    DigitalOcean,
+}
+
+/// VM MAC prefix → platform mapping.
+const VM_MAC_PREFIXES: &[(&str, VmPlatform)] = &[
+    ("00:0c:29", VmPlatform::VMware),
+    ("00:50:56", VmPlatform::VMware),
+    ("00:15:5d", VmPlatform::HyperV),
+    ("08:00:27", VmPlatform::VirtualBox),
+    ("52:54:00", VmPlatform::KvmQemu),
+    ("00:16:3e", VmPlatform::Xen),
+    ("00:1c:42", VmPlatform::Parallels),
+];
+
+/// Container MAC prefix.
+const CONTAINER_MAC_PREFIXES: &[(&str, ContainerPlatform)] = &[
+    ("02:42", ContainerPlatform::Docker),
+];
+
+/// Cloud provider MAC prefixes.
+const CLOUD_MAC_PREFIXES: &[(&str, CloudProvider)] = &[
+    ("00:0d:3a", CloudProvider::Azure),
+    ("00:17:fa", CloudProvider::Azure),
+];
+
+/// Classify a host based on its attributes.
+pub fn classify_host(host: &HostInfo) -> HostClass {
+    let mac_lower = host.mac.to_lowercase();
+
+    // Check VM MAC prefixes
+    for (prefix, platform) in VM_MAC_PREFIXES {
+        if mac_lower.starts_with(prefix) {
+            return HostClass::Vm(platform.clone());
+        }
+    }
+
+    // Check container MAC prefixes
+    for (prefix, platform) in CONTAINER_MAC_PREFIXES {
+        if mac_lower.starts_with(prefix) {
+            return HostClass::Container(platform.clone());
+        }
+    }
+
+    // Check cloud MAC prefixes
+    for (prefix, provider) in CLOUD_MAC_PREFIXES {
+        if mac_lower.starts_with(prefix) {
+            return HostClass::Cloud(provider.clone());
+        }
+    }
+
+    // Check port-based classification
+    let ports: Vec<u16> = host.services.iter().map(|s| s.port).collect();
+    if ports.contains(&2375) || ports.contains(&2376) {
+        return HostClass::Container(ContainerPlatform::Docker);
+    }
+    if ports.contains(&6443) || ports.contains(&10250) {
+        return HostClass::Container(ContainerPlatform::Kubernetes);
+    }
+
+    // Check reverse DNS patterns for cloud
+    if let Some(ref hostname) = host.hostname {
+        let h = hostname.to_lowercase();
+        if h.contains("amazonaws.com") || h.contains("ec2") {
+            return HostClass::Cloud(CloudProvider::Aws);
+        }
+        if h.contains("googleusercontent.com") || h.contains("gcp") {
+            return HostClass::Cloud(CloudProvider::Gcp);
+        }
+        if h.contains("azure") || h.contains("cloudapp") {
+            return HostClass::Cloud(CloudProvider::Azure);
+        }
+    }
+
+    // Check fingerprints for cloud/DNS patterns
+    for fp in &host.fingerprints {
+        if fp.key == "dns_hostname" {
+            let v = fp.value.to_lowercase();
+            if v.contains("amazonaws.com") {
+                return HostClass::Cloud(CloudProvider::Aws);
+            }
+            if v.contains("googleusercontent.com") {
+                return HostClass::Cloud(CloudProvider::Gcp);
+            }
+        }
+    }
+
+    HostClass::Physical
+}
+
+/// Derive classification fingerprints for a host.
+pub fn derive_classification(host: &HostInfo) -> Vec<Fingerprint> {
+    let class = classify_host(host);
+    let now = Utc::now();
+
+    let (category, value) = match &class {
+        HostClass::Physical => return Vec::new(), // no fingerprint for physical
+        HostClass::Vm(p) => ("hw", format!("vm:{p:?}").to_lowercase()),
+        HostClass::Container(p) => ("sw", format!("container:{p:?}").to_lowercase()),
+        HostClass::Cloud(p) => ("net", format!("cloud:{p:?}").to_lowercase()),
+    };
+
+    vec![Fingerprint {
+        source: FingerprintSource::Arp, // derived from MAC/port data
+        category: category.into(),
+        key: "classification".into(),
+        value,
+        confidence: 0.8,
+        observed_at: now,
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +451,71 @@ mod tests {
         let b = make_host("00:11:22:33:44:55", "10.0.0.1", Some("same"));
         let score = correlation_score(&a, &b);
         assert!(score <= 1.0);
+    }
+
+    // ── Classification tests ──────────────────────────────────────────
+
+    #[test]
+    fn classify_vmware() {
+        let host = make_host("00:0c:29:aa:bb:cc", "10.0.0.1", None);
+        assert_eq!(classify_host(&host), HostClass::Vm(VmPlatform::VMware));
+    }
+
+    #[test]
+    fn classify_docker() {
+        let host = make_host("02:42:ac:11:00:02", "172.17.0.2", None);
+        assert_eq!(classify_host(&host), HostClass::Container(ContainerPlatform::Docker));
+    }
+
+    #[test]
+    fn classify_hyperv() {
+        let host = make_host("00:15:5d:aa:bb:cc", "10.0.0.1", None);
+        assert_eq!(classify_host(&host), HostClass::Vm(VmPlatform::HyperV));
+    }
+
+    #[test]
+    fn classify_azure_mac() {
+        let host = make_host("00:0d:3a:aa:bb:cc", "10.0.0.1", None);
+        assert_eq!(classify_host(&host), HostClass::Cloud(CloudProvider::Azure));
+    }
+
+    #[test]
+    fn classify_aws_hostname() {
+        let host = make_host("aa:bb:cc:dd:ee:ff", "10.0.0.1", Some("ec2-1-2-3-4.compute-1.amazonaws.com"));
+        assert_eq!(classify_host(&host), HostClass::Cloud(CloudProvider::Aws));
+    }
+
+    #[test]
+    fn classify_kubernetes_ports() {
+        let mut host = make_host("aa:bb:cc:dd:ee:ff", "10.0.0.1", None);
+        host.services.push(ServiceInfo {
+            port: 6443,
+            protocol: "tcp".into(),
+            name: "kube-api".into(),
+            version: String::new(),
+            state: "open".into(),
+            banner: String::new(),
+        });
+        assert_eq!(classify_host(&host), HostClass::Container(ContainerPlatform::Kubernetes));
+    }
+
+    #[test]
+    fn classify_physical() {
+        let host = make_host("aa:bb:cc:dd:ee:ff", "10.0.0.1", None);
+        assert_eq!(classify_host(&host), HostClass::Physical);
+    }
+
+    #[test]
+    fn derive_classification_vm() {
+        let host = make_host("00:50:56:aa:bb:cc", "10.0.0.1", None);
+        let fps = derive_classification(&host);
+        assert!(!fps.is_empty());
+        assert!(fps[0].value.contains("vmware"));
+    }
+
+    #[test]
+    fn derive_classification_physical_empty() {
+        let host = make_host("aa:bb:cc:dd:ee:ff", "10.0.0.1", None);
+        assert!(derive_classification(&host).is_empty());
     }
 }

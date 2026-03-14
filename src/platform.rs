@@ -17,6 +17,7 @@ pub fn system_bin(name: &str) -> &'static str {
         "ifconfig" => "/sbin/ifconfig",
         "route" => "/usr/sbin/route",
         "networksetup" => "/usr/sbin/networksetup",
+        "host" => "/usr/bin/host",
         _ => {
             // Leak intentionally — these are process-lifetime constants.
             // Only called for a small fixed set of system tools.

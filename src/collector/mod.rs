@@ -1,9 +1,12 @@
 pub mod arp;
+pub mod arp_scan;
 pub mod banner;
+pub mod dns;
 pub mod interface;
 pub mod mdns;
 pub mod passive;
 pub mod scanner;
+pub mod ssdp;
 pub mod tls;
 #[cfg(target_os = "macos")]
 pub mod wifi;
