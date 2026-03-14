@@ -1,0 +1,8 @@
+{
+  "date": "2026-03-14T03:58:43Z",
+  "platform": "aarch64-darwin",
+  "rev": "21748d71b72411a8b8ef6a2328d2490062e3c63f",
+  "store_path": "/nix/store/agdnkjavp7rcnzswpkvd86rsdmv121py-rust_amimori-0.1.0",
+  "tests": "pass",
+  "tool": "amimori"
+}
