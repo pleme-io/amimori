@@ -226,6 +226,10 @@ rec {
             packageId = "dirs";
           }
           {
+            name = "etherparse";
+            packageId = "etherparse";
+          }
+          {
             name = "futures";
             packageId = "futures";
           }
@@ -260,6 +264,10 @@ rec {
             name = "objc2-foundation";
             packageId = "objc2-foundation";
             target = { target, features }: ("macos" == target."os" or null);
+          }
+          {
+            name = "pnet";
+            packageId = "pnet";
           }
           {
             name = "prost";
@@ -2533,6 +2541,27 @@ rec {
         ];
 
       };
+      "etherparse" = rec {
+        crateName = "etherparse";
+        version = "0.16.0";
+        edition = "2021";
+        sha256 = "0wvd1a3d7y3q6giy4s20ih07ymzp8p6j613shsflwj0pnq2agn5q";
+        authors = [
+          "Julian Schmid <info@julianschmid.name>"
+        ];
+        dependencies = [
+          {
+            name = "arrayvec";
+            packageId = "arrayvec";
+            usesDefaultFeatures = false;
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "std" = [ "arrayvec/std" ];
+        };
+        resolvedDefaultFeatures = [ "default" "std" ];
+      };
       "event-listener" = rec {
         crateName = "event-listener";
         version = "5.4.1";
@@ -4632,6 +4661,29 @@ rec {
         ];
 
       };
+      "ipnetwork" = rec {
+        crateName = "ipnetwork";
+        version = "0.20.0";
+        edition = "2021";
+        sha256 = "03hhmxyimz0800z44wl3z1ak8iw91xcnk7sgx5p5jinmx50naimz";
+        authors = [
+          "Abhishek Chanda <abhishek.becs@gmail.com>"
+          "Linus Färnstrand <faern@faern.net>"
+        ];
+        dependencies = [
+          {
+            name = "serde";
+            packageId = "serde";
+            optional = true;
+          }
+        ];
+        features = {
+          "default" = [ "serde" ];
+          "schemars" = [ "dep:schemars" ];
+          "serde" = [ "dep:serde" ];
+        };
+        resolvedDefaultFeatures = [ "default" "serde" ];
+      };
       "is_terminal_polyfill" = rec {
         crateName = "is_terminal_polyfill";
         version = "1.70.2";
@@ -5376,6 +5428,20 @@ rec {
         features = {
           "serde" = [ "dep:serde" ];
         };
+      };
+      "no-std-net" = rec {
+        crateName = "no-std-net";
+        version = "0.6.0";
+        edition = "2018";
+        sha256 = "0ravflgyh0q2142gjdz9iav5yqci3ga7gbnk4mmfcnqkrq54lya3";
+        libName = "no_std_net";
+        authors = [
+          "M@ Dunlap <mattdunlap@gmail.com>"
+        ];
+        features = {
+          "serde" = [ "dep:serde" ];
+        };
+        resolvedDefaultFeatures = [ "std" ];
       };
       "notify" = rec {
         crateName = "notify";
@@ -6626,6 +6692,266 @@ rec {
           "jzr"
         ];
 
+      };
+      "pnet" = rec {
+        crateName = "pnet";
+        version = "0.35.0";
+        edition = "2021";
+        sha256 = "03dx041cwl7z36xfyzg5sd4s269nz6nqmd7v17hc4g216fsrc8v8";
+        authors = [
+          "Robert Clipsham <robert@octarineparrot.com>"
+        ];
+        dependencies = [
+          {
+            name = "ipnetwork";
+            packageId = "ipnetwork";
+            optional = true;
+          }
+          {
+            name = "pnet_base";
+            packageId = "pnet_base";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "pnet_datalink";
+            packageId = "pnet_datalink";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "pnet_packet";
+            packageId = "pnet_packet";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "pnet_sys";
+            packageId = "pnet_sys";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "pnet_transport";
+            packageId = "pnet_transport";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "ipnetwork" = [ "dep:ipnetwork" ];
+          "netmap" = [ "pnet_datalink/netmap_sys" "pnet_datalink/netmap" ];
+          "pcap" = [ "pnet_datalink/pcap" ];
+          "pnet_datalink" = [ "dep:pnet_datalink" ];
+          "pnet_sys" = [ "dep:pnet_sys" ];
+          "pnet_transport" = [ "dep:pnet_transport" ];
+          "serde" = [ "pnet_base/serde" "pnet_datalink?/serde" ];
+          "std" = [ "pnet_base/std" "pnet_sys" "pnet_datalink" "pnet_transport" "ipnetwork" ];
+        };
+        resolvedDefaultFeatures = [ "default" "ipnetwork" "pnet_datalink" "pnet_sys" "pnet_transport" "std" ];
+      };
+      "pnet_base" = rec {
+        crateName = "pnet_base";
+        version = "0.35.0";
+        edition = "2021";
+        sha256 = "1xxj1ym32zqmy7m7ciiisv513rk9qis3p6x4mgrnmwbx0va91hgz";
+        authors = [
+          "Robert Clipsham <robert@octarineparrot.com>"
+          "Linus Färnstrand <faern@faern.net>"
+        ];
+        dependencies = [
+          {
+            name = "no-std-net";
+            packageId = "no-std-net";
+            usesDefaultFeatures = false;
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "serde" = [ "dep:serde" ];
+          "std" = [ "no-std-net/std" ];
+        };
+        resolvedDefaultFeatures = [ "std" ];
+      };
+      "pnet_datalink" = rec {
+        crateName = "pnet_datalink";
+        version = "0.35.0";
+        edition = "2021";
+        sha256 = "1dx7a9j2n7r463w8dv0wn1vasqnkhrajs79f6cm10qz11gn717p7";
+        authors = [
+          "Robert Clipsham <robert@octarineparrot.com>"
+          "Linus Färnstrand <faern@faern.net>"
+        ];
+        dependencies = [
+          {
+            name = "ipnetwork";
+            packageId = "ipnetwork";
+          }
+          {
+            name = "libc";
+            packageId = "libc";
+          }
+          {
+            name = "pnet_base";
+            packageId = "pnet_base";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "pnet_sys";
+            packageId = "pnet_sys";
+          }
+          {
+            name = "winapi";
+            packageId = "winapi";
+            target = { target, features }: (target."windows" or false);
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "netmap_sys" = [ "dep:netmap_sys" ];
+          "pcap" = [ "dep:pcap" ];
+          "serde" = [ "dep:serde" ];
+          "std" = [ "pnet_base/std" ];
+        };
+      };
+      "pnet_macros" = rec {
+        crateName = "pnet_macros";
+        version = "0.35.0";
+        edition = "2021";
+        sha256 = "0qy8f65cybbidzl1dfqjc5hk7l951k9y7j0b1d40ma71dv45lchk";
+        procMacro = true;
+        authors = [
+          "Robert Clipsham <robert@octarineparrot.com>"
+          "Pierre Chifflier <chifflier@wzdftpd.net>"
+        ];
+        dependencies = [
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "regex";
+            packageId = "regex";
+          }
+          {
+            name = "syn";
+            packageId = "syn 2.0.117";
+            features = [ "full" ];
+          }
+        ];
+        features = {
+        };
+        resolvedDefaultFeatures = [ "default" ];
+      };
+      "pnet_macros_support" = rec {
+        crateName = "pnet_macros_support";
+        version = "0.35.0";
+        edition = "2021";
+        sha256 = "1arl67djpslh9c99naf8cp32m63bqlgrn10303fhkmc54napmmpf";
+        authors = [
+          "Robert Clipsham <robert@octarineparrot.com>"
+        ];
+        dependencies = [
+          {
+            name = "pnet_base";
+            packageId = "pnet_base";
+            usesDefaultFeatures = false;
+          }
+        ];
+
+      };
+      "pnet_packet" = rec {
+        crateName = "pnet_packet";
+        version = "0.35.0";
+        edition = "2018";
+        sha256 = "03snjv5nl65vqxyvvf31hjgc701ssfkk1fin631gqddnzanyp5jc";
+        authors = [
+          "Robert Clipsham <robert@octarineparrot.com>"
+        ];
+        dependencies = [
+          {
+            name = "pnet_base";
+            packageId = "pnet_base";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "pnet_macros";
+            packageId = "pnet_macros";
+          }
+          {
+            name = "pnet_macros_support";
+            packageId = "pnet_macros_support";
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "glob";
+            packageId = "glob";
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "std" = [ "pnet_base/std" ];
+        };
+        resolvedDefaultFeatures = [ "default" "std" ];
+      };
+      "pnet_sys" = rec {
+        crateName = "pnet_sys";
+        version = "0.35.0";
+        edition = "2021";
+        sha256 = "0jqgl34w5jckvby74nh89hjc94m8m6pz7hjh21s0hsyvsk9l6ikx";
+        authors = [
+          "Robert Clipsham <robert@octarineparrot.com>"
+          "Linus Färnstrand <faern@faern.net>"
+        ];
+        dependencies = [
+          {
+            name = "libc";
+            packageId = "libc";
+          }
+          {
+            name = "winapi";
+            packageId = "winapi";
+            target = { target, features }: (target."windows" or false);
+            features = [ "winsock2" "ws2ipdef" ];
+          }
+        ];
+
+      };
+      "pnet_transport" = rec {
+        crateName = "pnet_transport";
+        version = "0.35.0";
+        edition = "2021";
+        sha256 = "1gvn8ygqx5wpmk29ddhxpzbbv0nq7whd6n4vf77r2r9apjc4sq2z";
+        authors = [
+          "Robert Clipsham <robert@octarineparrot.com>"
+        ];
+        dependencies = [
+          {
+            name = "libc";
+            packageId = "libc";
+          }
+          {
+            name = "pnet_base";
+            packageId = "pnet_base";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "pnet_packet";
+            packageId = "pnet_packet";
+          }
+          {
+            name = "pnet_sys";
+            packageId = "pnet_sys";
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "std" = [ "pnet_base/std" ];
+        };
       };
       "potential_utf" = rec {
         crateName = "potential_utf";
@@ -13530,7 +13856,7 @@ rec {
         features = {
           "debug" = [ "impl-debug" ];
         };
-        resolvedDefaultFeatures = [ "iphlpapi" "iptypes" "netioapi" "ntdef" "winerror" "ws2def" "ws2ipdef" ];
+        resolvedDefaultFeatures = [ "iphlpapi" "iptypes" "netioapi" "ntdef" "winerror" "winsock2" "ws2def" "ws2ipdef" ];
       };
       "winapi-i686-pc-windows-gnu" = rec {
         crateName = "winapi-i686-pc-windows-gnu";
