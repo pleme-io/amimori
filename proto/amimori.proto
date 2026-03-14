@@ -1,0 +1,103 @@
+syntax = "proto3";
+package amimori;
+
+import "google/protobuf/timestamp.proto";
+
+service NetworkProfiler {
+  rpc GetSnapshot(SnapshotRequest) returns (NetworkSnapshot);
+  rpc Subscribe(SubscribeRequest) returns (stream DeltaUpdate);
+  rpc GetHost(HostRequest) returns (Host);
+  rpc ListInterfaces(Empty) returns (InterfaceList);
+  rpc ListWifiNetworks(Empty) returns (WifiNetworkList);
+}
+
+message Empty {}
+
+message SnapshotRequest {
+  string interface = 1;  // optional: filter by interface
+}
+
+message SubscribeRequest {
+  uint64 since_sequence = 1;  // replay from this sequence (0 = snapshot + stream)
+  string interface = 2;       // optional: filter
+}
+
+message HostRequest {
+  string address = 1;  // MAC or IP
+}
+
+message NetworkSnapshot {
+  repeated NetworkInterface interfaces = 1;
+  repeated Host hosts = 2;
+  repeated WifiNetwork wifi_networks = 3;
+  uint64 sequence = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+message DeltaUpdate {
+  uint64 sequence = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  oneof change {
+    Host host_added = 3;
+    Host host_removed = 4;
+    Host host_updated = 5;
+    ServiceChange service_changed = 6;
+    WifiNetwork wifi_added = 7;
+    WifiNetwork wifi_removed = 8;
+    WifiNetwork wifi_updated = 9;
+    NetworkInterface interface_changed = 10;
+  }
+}
+
+message NetworkInterface {
+  string name = 1;          // en0, en4, etc.
+  string mac = 2;
+  repeated string ipv4 = 3;
+  repeated string ipv6 = 4;
+  string gateway = 5;
+  string subnet = 6;
+  bool is_up = 7;
+  string kind = 8;          // wifi, ethernet, tunnel
+  repeated string dns = 9;
+}
+
+message Host {
+  string mac = 1;
+  string vendor = 2;
+  repeated string ipv4 = 3;
+  repeated string ipv6 = 4;
+  string hostname = 5;
+  string os_hint = 6;
+  repeated Service services = 7;
+  string interface = 8;
+  google.protobuf.Timestamp first_seen = 9;
+  google.protobuf.Timestamp last_seen = 10;
+}
+
+message Service {
+  uint32 port = 1;
+  string protocol = 2;     // tcp, udp
+  string name = 3;         // http, ssh, etc.
+  string version = 4;
+  string state = 5;        // open, closed, filtered
+}
+
+message ServiceChange {
+  string host_mac = 1;
+  Service service = 2;
+  string change_type = 3;  // added, removed, updated
+}
+
+message WifiNetwork {
+  string ssid = 1;
+  string bssid = 2;
+  int32 rssi = 3;
+  int32 noise = 4;
+  uint32 channel = 5;
+  string band = 6;         // 2.4GHz, 5GHz, 6GHz
+  string security = 7;     // WPA2, WPA3, Open, etc.
+  string interface = 8;
+}
+
+message InterfaceList { repeated NetworkInterface interfaces = 1; }
+message WifiNetworkList { repeated WifiNetwork networks = 1; }

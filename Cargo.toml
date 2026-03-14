@@ -1,0 +1,65 @@
+[package]
+name = "amimori"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89.0"
+license = "MIT"
+description = "Continuous network profiler — daemon + gRPC + MCP server"
+
+[dependencies]
+# pleme-io
+kaname = { git = "https://github.com/pleme-io/kaname" }
+shikumi = { git = "https://github.com/pleme-io/shikumi" }
+
+# MCP
+rmcp = { version = "0.15", features = ["server", "transport-io"] }
+schemars = "1"
+
+# gRPC
+tonic = "0.13"
+prost = "0.13"
+prost-types = "0.13"
+
+# Network
+network-interface = "2"
+
+# Storage (Sea stack)
+sea-orm = { version = "1", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-chrono"] }
+sea-orm-migration = { version = "1", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+sea-query = "0.32"
+dashmap = "6"
+
+# Runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+mac_oui = { version = "0.4", features = ["with-db"] }
+async-trait = "0.1"
+dirs = "6"
+shellexpand = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-wlan = "0.3"
+objc2-foundation = "0.3"
+objc2 = "0.6"
+
+[build-dependencies]
+tonic-build = "0.13"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true
+
+[lints.clippy]
+pedantic = "warn"
