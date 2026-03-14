@@ -6,22 +6,33 @@ Persistent macOS/Linux service that continuously profiles all attached networks
 
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) for detailed ADRs.
+See [docs/architecture.md](docs/architecture.md) for detailed ADRs (14 decisions).
 See [docs/data-model.md](docs/data-model.md) for entity relationships and host lifecycle.
+See [docs/roadmap.md](docs/roadmap.md) for the 5-phase roadmap with competitive analysis.
 
 ```
-Collectors (per-actor scheduling)    State Engine                 Servers
-┌──────────────────────────────┐    ┌────────────────────────┐   ┌──────────┐
-│ ArpCollector     (5s, react) │───▶│ NetworkState (DashMap)  │◀─▶│ gRPC     │
-│ InterfaceCollector (5s)      │───▶│ insert_host() gate      │   │ GetChanges│
-│ WifiCollector    (15s, macOS)│───▶│ Progressive enrichment  │   │ Subscribe│
-│ NmapCollector    (60s, react)│───▶│ Service change detection│   ├──────────┤
-└──────────────────────────────┘    │ Event timeline (3-tier) │   │ MCP      │
-  ↑ reactive triggers (event bus)   │ SQLite (SeaORM)         │   │ (stdio)  │
-  ↑ auto-disable on max_failures    │ OUI vendor lookup       │   └──────────┘
-  ↑ configurable per-collector      │ Filter engine           │
-                                    │ Stale host/event pruner │
-                                    └────────────────────────┘
+Collectors (8 active, per-actor scheduling)
+┌────────────────────────────────────┐    State Engine                 Servers
+│ L0 Passive:                        │   ┌────────────────────────┐   ┌──────────┐
+│   ArpCollector     (5s, react)     │──▶│ NetworkState (DashMap)  │◀─▶│ gRPC     │
+│   InterfaceCollector (5s)          │──▶│ insert_host() gate      │   │ GetChanges│
+│   WifiCollector    (15s, macOS)    │──▶│ IP→MAC reverse index    │   │ Subscribe│
+│   MdnsCollector    (30s)           │──▶│ Progressive enrichment  │   ├──────────┤
+│   PassiveCollector (30s, pnet/BPF) │──▶│ Service change detection│   │ MCP      │
+│ L1 Safe:                           │   │ Fingerprint merging     │   │ (stdio)  │
+│   BannerCollector  (120s)          │──▶│ Event timeline (3-tier) │   └──────────┘
+│   TlsCollector     (180s)          │──▶│ SQLite (SeaORM)         │
+│ L2 Discovery:                      │   │ OUI vendor lookup       │
+│   NmapCollector    (60s, react)    │──▶│ Filter engine           │
+└────────────────────────────────────┘   │ Stale host/event pruner │
+  ↑ reactive triggers (event bus)        └────────┬───────────────┘
+  ↑ auto-disable on max_failures                  │
+  ↑ probe level gating                    Enrichment Pipeline
+                                          ┌───────┴───────────┐
+                                          │ CPE mapping        │
+                                          │ Outlier scoring    │
+                                          │ Multi-attr correl. │
+                                          └───────────────────┘
 ```
 
 ### Three-Tier Event System (ADR-001)
@@ -167,10 +178,11 @@ Every external dependency is behind a trait for testability:
 ```
 src/
 ├── main.rs              # clap: daemon | mcp | scan | status
-├── config.rs            # nested config with validation
+├── config.rs            # nested config with validation + probe level
 ├── daemon.rs            # orchestrate collectors + gRPC + pruner
 ├── state.rs             # DashMap + delta engine + filters + pruning + emit
-├── model.rs             # domain types, MAC gate, serde
+├── model.rs             # domain types, MAC gate, fingerprints, outlier scoring
+├── enrichment.rs        # CPE mapping, multi-attribute correlation
 ├── platform.rs          # system binary resolution (ADR-003)
 ├── error.rs             # error types
 ├── event_bus.rs         # trigger events for reactive scheduling
@@ -182,14 +194,19 @@ src/
 ├── collector/
 │   ├── mod.rs           # Collector trait + actor scheduler (ADR-006)
 │   ├── arp.rs           # parse arp -a (via platform::system_bin)
+│   ├── banner.rs        # TCP banner grab + HTTP headers
 │   ├── interface.rs     # network-interface + netstat + scutil
-│   ├── wifi.rs          # CoreWLAN (macOS, #[cfg])
-│   └── scanner.rs       # nmap with deep fingerprinting (ADR-008)
+│   ├── mdns.rs          # mDNS/DNS-SD passive discovery (mdns-sd)
+│   ├── passive.rs       # TCP/DHCP fingerprinting (pnet + etherparse)
+│   ├── scanner.rs       # nmap deep fingerprinting (ADR-008)
+│   ├── tls.rs           # TLS certificate extraction (tokio-rustls)
+│   └── wifi.rs          # CoreWLAN (macOS, #[cfg])
 ├── grpc.rs              # tonic server + proto conversions
 ├── mcp.rs               # 7 MCP tools via rmcp
 docs/
-├── architecture.md      # ADR decisions
-└── data-model.md        # entity relationships, host lifecycle, event types
+├── architecture.md      # 14 ADR decisions
+├── data-model.md        # entity relationships, host lifecycle, event types
+└── roadmap.md           # 5-phase roadmap with competitive analysis
 proto/
 └── amimori.proto        # gRPC service definition
 module/
