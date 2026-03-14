@@ -47,6 +47,30 @@ impl NetworkProfiler for ProfilerService {
         )))
     }
 
+    async fn get_convergence(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<proto::ConvergenceStatus>, Status> {
+        let conv = self.engine.convergence.score();
+        let enriched = self.engine.state.hosts.iter()
+            .filter(|e| !e.value().fingerprints.is_empty())
+            .count() as u32;
+
+        Ok(Response::new(proto::ConvergenceStatus {
+            score: conv.score,
+            phase: conv.phase.to_string(),
+            since_new_host_secs: conv.since_new_host,
+            since_new_service_secs: conv.since_new_service,
+            stable_arp_cycles: conv.stable_arp_cycles,
+            stable_nmap_cycles: conv.stable_nmap_cycles,
+            collectors_reported: conv.collectors_reported,
+            expected_collectors: conv.expected_collectors,
+            uptime_secs: conv.uptime,
+            total_hosts: self.engine.state.hosts.len() as u32,
+            enriched_hosts: enriched,
+        }))
+    }
+
     async fn get_changes(
         &self,
         request: Request<ChangesRequest>,

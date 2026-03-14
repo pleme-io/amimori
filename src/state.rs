@@ -22,12 +22,11 @@ pub struct StateEngine {
     pub state: Arc<NetworkState>,
     event_log: Arc<RwLock<VecDeque<DeltaEvent>>>,
     /// Non-blocking broadcast for live event subscribers (gRPC Subscribe).
-    /// Unlike Vec<mpsc::Sender>, a single slow/hung client cannot block
-    /// the state engine from emitting events to all other clients.
     event_broadcast: broadcast::Sender<DeltaEvent>,
     db: Arc<dyn StorageBackend>,
     vendor: Arc<dyn VendorLookup>,
     trigger_bus: Option<broadcast::Sender<TriggerEvent>>,
+    pub convergence: Arc<crate::convergence::ConvergenceTracker>,
     filters: FilterConfig,
     buffer_size: usize,
 }
@@ -77,6 +76,7 @@ impl StateEngine {
             db: Arc::new(db),
             vendor: Arc::new(vendor),
             trigger_bus,
+            convergence: Arc::new(crate::convergence::ConvergenceTracker::new(14)),
             filters: config.filters.clone(),
             buffer_size: config.storage.event_buffer_size,
         })
@@ -100,6 +100,7 @@ impl StateEngine {
             db,
             vendor,
             trigger_bus: None,
+            convergence: Arc::new(crate::convergence::ConvergenceTracker::new(0)),
             filters,
             buffer_size,
         }
@@ -721,6 +722,16 @@ impl StateEngine {
         let seq = self.state.sequence.fetch_add(1, Ordering::Relaxed) + 1;
 
         tracing::trace!(seq, change = %change, "delta event");
+
+        // Update convergence tracker based on change type
+        match &change {
+            Change::HostAdded(_) => self.convergence.on_host_added(),
+            Change::ServiceChanged { change_type: ChangeType::Added, .. } => {
+                self.convergence.on_service_added();
+            }
+            Change::NetworkChanged { .. } => self.convergence.reset(),
+            _ => {}
+        }
 
         let event = DeltaEvent {
             sequence: seq,

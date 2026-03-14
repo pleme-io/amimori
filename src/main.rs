@@ -1,5 +1,6 @@
 mod collector;
 mod config;
+mod convergence;
 mod daemon;
 mod db;
 mod enrichment;

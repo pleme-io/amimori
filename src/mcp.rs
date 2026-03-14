@@ -319,6 +319,37 @@ impl AmimoriMcp {
         }
     }
 
+    #[tool(description = "Check network scan convergence — is it safe to analyze results?")]
+    async fn network_convergence(&self, Parameters(_): Parameters<EmptyInput>) -> String {
+        let mut client = self.client();
+
+        match client.get_convergence(proto::Empty {}).await {
+            Ok(resp) => {
+                let c = resp.into_inner();
+                let mut out = String::new();
+                use std::fmt::Write;
+
+                let _ = writeln!(out, "Network Convergence: {:.0}% ({})\n", c.score * 100.0, c.phase);
+                let _ = writeln!(out, "  uptime: {}s", c.uptime_secs);
+                let _ = writeln!(out, "  hosts: {} ({} enriched)", c.total_hosts, c.enriched_hosts);
+                let _ = writeln!(out, "  since last new host: {}s", c.since_new_host_secs);
+                let _ = writeln!(out, "  since last new service: {}s", c.since_new_service_secs);
+                let _ = writeln!(out, "  stable ARP cycles: {}", c.stable_arp_cycles);
+                let _ = writeln!(out, "  stable nmap cycles: {}", c.stable_nmap_cycles);
+                let _ = writeln!(out, "  collectors reported: {}/{}", c.collectors_reported, c.expected_collectors);
+
+                if c.phase == "converged" {
+                    let _ = writeln!(out, "\n✓ Network fully profiled — safe to analyze.");
+                } else {
+                    let _ = writeln!(out, "\n⏳ Still scanning — results may be incomplete.");
+                }
+
+                out
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
     #[tool(description = "Get profiler daemon health, statistics, and configuration")]
     async fn network_stats(&self, Parameters(_): Parameters<EmptyInput>) -> String {
         let mut client = self.client();

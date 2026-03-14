@@ -157,6 +157,25 @@ index. `insert_host()` updates it automatically. Host removal cleans it.
 IP address (IpAddr + String MAC key). For 10,000 hosts with 1-2 IPs each,
 this is ~400-800 KB — trivial.
 
+## ADR-015: Network Convergence Detection
+
+**Context:** After starting the daemon, how do you know when the network
+scan is "done" — when it's safe to analyze results vs still discovering?
+Networks also change over time, so convergence is not permanent.
+
+**Decision:** `ConvergenceTracker` computes a 0.0-1.0 score from 5 weighted
+factors: time since last new host (30%), time since last new service (25%),
+stable ARP cycles (20%), stable nmap cycles (15%), collector coverage (10%).
+
+Four phases: Discovering → Enriching → NearConverged → Converged.
+
+The tracker auto-resets on network transitions (gateway/subnet change).
+New host discoveries drop the score immediately (de-convergence).
+
+**Consequence:** MCP and gRPC clients can poll `network_convergence` /
+`GetConvergence` to determine when analysis is meaningful. Automation
+can wait for convergence before running reports.
+
 ## ADR-009: DNS Deduplication at Parse Time
 
 **Context:** macOS `scutil --dns` lists dozens of resolver stanzas for the

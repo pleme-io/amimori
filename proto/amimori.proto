@@ -6,6 +6,7 @@ import "google/protobuf/timestamp.proto";
 service NetworkProfiler {
   rpc GetSnapshot(SnapshotRequest) returns (NetworkSnapshot);
   rpc GetChanges(ChangesRequest) returns (ChangesResponse);
+  rpc GetConvergence(Empty) returns (ConvergenceStatus);
   rpc Subscribe(SubscribeRequest) returns (stream DeltaUpdate);
   rpc GetHost(HostRequest) returns (Host);
   rpc ListInterfaces(Empty) returns (InterfaceList);
@@ -126,6 +127,20 @@ message WifiNetwork {
   string band = 6;         // 2.4GHz, 5GHz, 6GHz
   string security = 7;     // WPA2, WPA3, Open, etc.
   string interface = 8;
+}
+
+message ConvergenceStatus {
+  float score = 1;                    // 0.0-1.0 overall convergence
+  string phase = 2;                   // discovering, enriching, near-converged, converged
+  uint64 since_new_host_secs = 3;     // seconds since last new host
+  uint64 since_new_service_secs = 4;  // seconds since last new service
+  uint64 stable_arp_cycles = 5;       // consecutive stable ARP cycles
+  uint64 stable_nmap_cycles = 6;      // consecutive stable nmap cycles
+  uint32 collectors_reported = 7;     // how many collectors have reported
+  uint32 expected_collectors = 8;
+  uint64 uptime_secs = 9;
+  uint32 total_hosts = 10;
+  uint32 enriched_hosts = 11;         // hosts with fingerprints
 }
 
 message InterfaceList { repeated NetworkInterface interfaces = 1; }
