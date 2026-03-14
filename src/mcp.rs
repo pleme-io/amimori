@@ -366,6 +366,176 @@ fn format_interfaces(interfaces: &[proto::NetworkInterface]) -> String {
 
 // ── Entry point ────────────────────────────────────────────────────────────
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proto_host() -> proto::Host {
+        proto::Host {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: "Apple".into(),
+            ipv4: vec!["10.0.0.1".into()],
+            ipv6: vec!["fe80::1".into()],
+            hostname: "macbook".into(),
+            os_hint: "macOS".into(),
+            services: vec![proto::Service {
+                port: 22,
+                protocol: "tcp".into(),
+                name: "ssh".into(),
+                version: "OpenSSH 9".into(),
+                state: "open".into(),
+            }],
+            interface: "en0".into(),
+            first_seen: None,
+            last_seen: None,
+        }
+    }
+
+    fn proto_wifi() -> proto::WifiNetwork {
+        proto::WifiNetwork {
+            ssid: "HomeNet".into(),
+            bssid: "11:22:33:44:55:66".into(),
+            rssi: -55,
+            noise: -90,
+            channel: 36,
+            band: "5GHz".into(),
+            security: "WPA3".into(),
+            interface: "en0".into(),
+        }
+    }
+
+    fn proto_iface() -> proto::NetworkInterface {
+        proto::NetworkInterface {
+            name: "en0".into(),
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ipv4: vec!["10.0.0.5".into()],
+            ipv6: vec![],
+            gateway: "10.0.0.1".into(),
+            subnet: "255.255.255.0".into(),
+            is_up: true,
+            kind: "wifi".into(),
+            dns: vec!["8.8.8.8".into()],
+        }
+    }
+
+    // ── format_snapshot ────────────────────────────────────────────────
+
+    #[test]
+    fn format_snapshot_empty() {
+        let snap = proto::NetworkSnapshot {
+            interfaces: vec![],
+            hosts: vec![],
+            wifi_networks: vec![],
+            sequence: 0,
+            timestamp: None,
+        };
+        let out = format_snapshot(&snap);
+        assert!(out.contains("Interfaces (0)"));
+        assert!(out.contains("Hosts (0)"));
+        assert!(out.contains("WiFi (0)"));
+    }
+
+    #[test]
+    fn format_snapshot_with_data() {
+        let snap = proto::NetworkSnapshot {
+            interfaces: vec![proto_iface()],
+            hosts: vec![proto_host()],
+            wifi_networks: vec![proto_wifi()],
+            sequence: 42,
+            timestamp: None,
+        };
+        let out = format_snapshot(&snap);
+        assert!(out.contains("seq: 42"));
+        assert!(out.contains("Interfaces (1)"));
+        assert!(out.contains("en0"));
+        assert!(out.contains("Hosts (1)"));
+        assert!(out.contains("aa:bb:cc:dd:ee:ff"));
+        assert!(out.contains("WiFi (1)"));
+        assert!(out.contains("HomeNet"));
+    }
+
+    // ── format_hosts ───────────────────────────────────────────────────
+
+    #[test]
+    fn format_hosts_empty() {
+        let out = format_hosts(&[]);
+        assert!(out.contains("0 hosts"));
+    }
+
+    #[test]
+    fn format_hosts_with_services() {
+        let out = format_hosts(&[proto_host()]);
+        assert!(out.contains("1 hosts"));
+        assert!(out.contains("22(ssh)"));
+    }
+
+    #[test]
+    fn format_hosts_service_without_name() {
+        let mut h = proto_host();
+        h.services[0].name = String::new();
+        let out = format_hosts(&[h]);
+        assert!(out.contains("22/tcp"));
+    }
+
+    // ── format_host_detail ─────────────────────────────────────────────
+
+    #[test]
+    fn format_host_detail_all_fields() {
+        let out = format_host_detail(&proto_host());
+        assert!(out.contains("MAC: aa:bb:cc:dd:ee:ff"));
+        assert!(out.contains("Vendor: Apple"));
+        assert!(out.contains("Hostname: macbook"));
+        assert!(out.contains("OS: macOS"));
+        assert!(out.contains("Interface: en0"));
+        assert!(out.contains("Services:"));
+        assert!(out.contains("22/tcp ssh OpenSSH 9 [open]"));
+    }
+
+    #[test]
+    fn format_host_detail_no_services() {
+        let mut h = proto_host();
+        h.services.clear();
+        let out = format_host_detail(&h);
+        assert!(!out.contains("Services:"));
+    }
+
+    // ── format_wifi ────────────────────────────────────────────────────
+
+    #[test]
+    fn format_wifi_empty() {
+        let out = format_wifi(&[]);
+        assert!(out.contains("0 WiFi networks"));
+    }
+
+    #[test]
+    fn format_wifi_with_snr() {
+        let out = format_wifi(&[proto_wifi()]);
+        assert!(out.contains("HomeNet"));
+        assert!(out.contains("rssi=-55"));
+        // SNR = -55 - (-90) = 35
+        assert!(out.contains("snr=35"));
+    }
+
+    // ── format_interfaces ──────────────────────────────────────────────
+
+    #[test]
+    fn format_interfaces_empty() {
+        let out = format_interfaces(&[]);
+        assert!(out.contains("0 interfaces"));
+    }
+
+    #[test]
+    fn format_interfaces_up_down() {
+        let mut down = proto_iface();
+        down.name = "en4".into();
+        down.is_up = false;
+        let out = format_interfaces(&[proto_iface(), down]);
+        assert!(out.contains("2 interfaces"));
+        assert!(out.contains("en0") && out.contains("UP"));
+        assert!(out.contains("en4") && out.contains("DOWN"));
+    }
+}
+
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_url = std::env::var("AMIMORI_GRPC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());

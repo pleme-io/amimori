@@ -276,3 +276,399 @@ fn chrono_to_proto(dt: chrono::DateTime<Utc>) -> Timestamp {
         nanos: dt.timestamp_subsec_nanos() as i32,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::FilterConfig;
+    use crate::model::{
+        Change, ChangeType, InterfaceKind, ServiceInfo,
+    };
+    use crate::traits::mocks::{InMemoryStorage, MockVendorLookup};
+    use chrono::TimeZone;
+
+    fn test_host() -> HostInfo {
+        HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: "TestVendor".into(),
+            addresses: vec![
+                "10.0.0.1".parse().unwrap(),
+                "fe80::1".parse().unwrap(),
+            ],
+            hostname: Some("myhost".into()),
+            os_hint: None,
+            services: vec![ServiceInfo {
+                port: 22,
+                protocol: "tcp".into(),
+                name: "ssh".into(),
+                version: "OpenSSH 9".into(),
+                state: "open".into(),
+            }],
+            interface: "en0".into(),
+            network_id: "10.0.0.1|255.255.255.0".into(),
+            first_seen: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            last_seen: Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
+        }
+    }
+
+    fn test_iface() -> InterfaceInfo {
+        InterfaceInfo {
+            name: "en0".into(),
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ipv4: vec!["10.0.0.5".parse().unwrap()],
+            ipv6: vec!["fe80::5".parse().unwrap()],
+            gateway: "10.0.0.1".into(),
+            subnet: "255.255.255.0".into(),
+            is_up: true,
+            kind: InterfaceKind::Wifi,
+            dns: vec!["8.8.8.8".into(), "8.8.4.4".into()],
+        }
+    }
+
+    fn test_wifi() -> WifiInfo {
+        WifiInfo {
+            ssid: "TestNet".into(),
+            bssid: "11:22:33:44:55:66".into(),
+            rssi: -55,
+            noise: -90,
+            channel: 36,
+            band: "5GHz".into(),
+            security: "WPA3 Personal".into(),
+            interface: "en0".into(),
+        }
+    }
+
+    // ── chrono_to_proto ────────────────────────────────────────────────
+
+    #[test]
+    fn chrono_to_proto_known_timestamp() {
+        let dt = Utc.with_ymd_and_hms(2025, 6, 15, 12, 30, 45).unwrap();
+        let ts = chrono_to_proto(dt);
+        assert_eq!(ts.seconds, dt.timestamp());
+        assert_eq!(ts.nanos, 0);
+    }
+
+    #[test]
+    fn chrono_to_proto_epoch() {
+        let dt = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap();
+        let ts = chrono_to_proto(dt);
+        assert_eq!(ts.seconds, 0);
+        assert_eq!(ts.nanos, 0);
+    }
+
+    // ── host_to_proto ──────────────────────────────────────────────────
+
+    #[test]
+    fn host_to_proto_splits_ipv4_ipv6() {
+        let h = test_host();
+        let p = host_to_proto(&h);
+        assert_eq!(p.ipv4, vec!["10.0.0.1"]);
+        assert_eq!(p.ipv6, vec!["fe80::1"]);
+    }
+
+    #[test]
+    fn host_to_proto_maps_fields() {
+        let h = test_host();
+        let p = host_to_proto(&h);
+        assert_eq!(p.mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(p.vendor, "TestVendor");
+        assert_eq!(p.hostname, "myhost");
+        assert_eq!(p.interface, "en0");
+        assert!(p.first_seen.is_some());
+        assert!(p.last_seen.is_some());
+    }
+
+    #[test]
+    fn host_to_proto_converts_services() {
+        let h = test_host();
+        let p = host_to_proto(&h);
+        assert_eq!(p.services.len(), 1);
+        assert_eq!(p.services[0].port, 22);
+        assert_eq!(p.services[0].name, "ssh");
+        assert_eq!(p.services[0].version, "OpenSSH 9");
+        assert_eq!(p.services[0].state, "open");
+    }
+
+    #[test]
+    fn host_to_proto_none_fields_default_empty() {
+        let mut h = test_host();
+        h.hostname = None;
+        h.os_hint = None;
+        let p = host_to_proto(&h);
+        assert_eq!(p.hostname, "");
+        assert_eq!(p.os_hint, "");
+    }
+
+    // ── iface_to_proto ─────────────────────────────────────────────────
+
+    #[test]
+    fn iface_to_proto_maps_all_fields() {
+        let i = test_iface();
+        let p = iface_to_proto(&i);
+        assert_eq!(p.name, "en0");
+        assert_eq!(p.mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(p.ipv4, vec!["10.0.0.5"]);
+        assert_eq!(p.ipv6, vec!["fe80::5"]);
+        assert_eq!(p.gateway, "10.0.0.1");
+        assert_eq!(p.subnet, "255.255.255.0");
+        assert!(p.is_up);
+        assert_eq!(p.kind, "wifi");
+        assert_eq!(p.dns, vec!["8.8.8.8", "8.8.4.4"]);
+    }
+
+    // ── wifi_to_proto ──────────────────────────────────────────────────
+
+    #[test]
+    fn wifi_to_proto_maps_all_fields() {
+        let w = test_wifi();
+        let p = wifi_to_proto(&w);
+        assert_eq!(p.ssid, "TestNet");
+        assert_eq!(p.bssid, "11:22:33:44:55:66");
+        assert_eq!(p.rssi, -55);
+        assert_eq!(p.noise, -90);
+        assert_eq!(p.channel, 36);
+        assert_eq!(p.band, "5GHz");
+        assert_eq!(p.security, "WPA3 Personal");
+        assert_eq!(p.interface, "en0");
+    }
+
+    // ── svc_to_proto ───────────────────────────────────────────────────
+
+    #[test]
+    fn svc_to_proto_maps_port_as_u32() {
+        let s = ServiceInfo {
+            port: 443,
+            protocol: "tcp".into(),
+            name: "https".into(),
+            version: "".into(),
+            state: "open".into(),
+        };
+        let p = svc_to_proto(&s);
+        assert_eq!(p.port, 443);
+        assert_eq!(p.protocol, "tcp");
+        assert_eq!(p.name, "https");
+    }
+
+    // ── delta_to_proto ─────────────────────────────────────────────────
+
+    #[test]
+    fn delta_to_proto_host_added() {
+        let event = DeltaEvent {
+            sequence: 1,
+            timestamp: Utc::now(),
+            change: Change::HostAdded(test_host()),
+        };
+        let p = delta_to_proto(&event);
+        assert_eq!(p.sequence, 1);
+        assert!(p.timestamp.is_some());
+        assert!(matches!(
+            p.change,
+            Some(proto::delta_update::Change::HostAdded(_))
+        ));
+    }
+
+    #[test]
+    fn delta_to_proto_host_removed() {
+        let event = DeltaEvent {
+            sequence: 2,
+            timestamp: Utc::now(),
+            change: Change::HostRemoved {
+                mac: "aa:bb:cc:dd:ee:ff".into(),
+            },
+        };
+        let p = delta_to_proto(&event);
+        if let Some(proto::delta_update::Change::HostRemoved(h)) = p.change {
+            assert_eq!(h.mac, "aa:bb:cc:dd:ee:ff");
+        } else {
+            panic!("expected HostRemoved");
+        }
+    }
+
+    #[test]
+    fn delta_to_proto_host_updated() {
+        let event = DeltaEvent {
+            sequence: 3,
+            timestamp: Utc::now(),
+            change: Change::HostUpdated(test_host()),
+        };
+        let p = delta_to_proto(&event);
+        assert!(matches!(
+            p.change,
+            Some(proto::delta_update::Change::HostUpdated(_))
+        ));
+    }
+
+    #[test]
+    fn delta_to_proto_service_changed() {
+        let event = DeltaEvent {
+            sequence: 4,
+            timestamp: Utc::now(),
+            change: Change::ServiceChanged {
+                mac: "aa:bb:cc:dd:ee:ff".into(),
+                service: ServiceInfo {
+                    port: 80,
+                    protocol: "tcp".into(),
+                    name: "http".into(),
+                    version: "".into(),
+                    state: "open".into(),
+                },
+                change_type: ChangeType::Added,
+            },
+        };
+        let p = delta_to_proto(&event);
+        if let Some(proto::delta_update::Change::ServiceChanged(sc)) = p.change {
+            assert_eq!(sc.host_mac, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(sc.change_type, "added");
+            assert_eq!(sc.service.unwrap().port, 80);
+        } else {
+            panic!("expected ServiceChanged");
+        }
+    }
+
+    #[test]
+    fn delta_to_proto_wifi_added() {
+        let event = DeltaEvent {
+            sequence: 5,
+            timestamp: Utc::now(),
+            change: Change::WifiAdded(test_wifi()),
+        };
+        let p = delta_to_proto(&event);
+        assert!(matches!(
+            p.change,
+            Some(proto::delta_update::Change::WifiAdded(_))
+        ));
+    }
+
+    #[test]
+    fn delta_to_proto_wifi_removed() {
+        let event = DeltaEvent {
+            sequence: 6,
+            timestamp: Utc::now(),
+            change: Change::WifiRemoved {
+                bssid: "11:22:33:44:55:66".into(),
+            },
+        };
+        let p = delta_to_proto(&event);
+        if let Some(proto::delta_update::Change::WifiRemoved(w)) = p.change {
+            assert_eq!(w.bssid, "11:22:33:44:55:66");
+        } else {
+            panic!("expected WifiRemoved");
+        }
+    }
+
+    #[test]
+    fn delta_to_proto_wifi_updated() {
+        let event = DeltaEvent {
+            sequence: 7,
+            timestamp: Utc::now(),
+            change: Change::WifiUpdated(test_wifi()),
+        };
+        let p = delta_to_proto(&event);
+        assert!(matches!(
+            p.change,
+            Some(proto::delta_update::Change::WifiUpdated(_))
+        ));
+    }
+
+    #[test]
+    fn delta_to_proto_interface_changed() {
+        let event = DeltaEvent {
+            sequence: 8,
+            timestamp: Utc::now(),
+            change: Change::InterfaceChanged(test_iface()),
+        };
+        let p = delta_to_proto(&event);
+        assert!(matches!(
+            p.change,
+            Some(proto::delta_update::Change::InterfaceChanged(_))
+        ));
+    }
+
+    #[test]
+    fn delta_to_proto_network_changed() {
+        let event = DeltaEvent {
+            sequence: 9,
+            timestamp: Utc::now(),
+            change: Change::NetworkChanged {
+                interface: "en0".into(),
+                old_network_id: "10.0.0.1|255.255.255.0".into(),
+                new_network_id: "192.168.1.1|255.255.255.0".into(),
+                hosts_cleared: 5,
+            },
+        };
+        let p = delta_to_proto(&event);
+        // NetworkChanged maps to InterfaceChanged in proto
+        if let Some(proto::delta_update::Change::InterfaceChanged(i)) = p.change {
+            assert_eq!(i.name, "en0");
+        } else {
+            panic!("expected InterfaceChanged for NetworkChanged");
+        }
+    }
+
+    // ── build_snapshot ─────────────────────────────────────────────────
+
+    #[test]
+    fn build_snapshot_empty_state() {
+        let engine = StateEngine::with_mocks(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+        let snap = build_snapshot(&engine, None);
+        assert!(snap.interfaces.is_empty());
+        assert!(snap.hosts.is_empty());
+        assert!(snap.wifi_networks.is_empty());
+        assert_eq!(snap.sequence, 0);
+        assert!(snap.timestamp.is_some());
+    }
+
+    #[test]
+    fn build_snapshot_with_data() {
+        let engine = StateEngine::with_mocks(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+        engine
+            .state
+            .interfaces
+            .insert("en0".into(), test_iface());
+        engine
+            .state
+            .hosts
+            .insert("aa:bb:cc:dd:ee:ff".into(), test_host());
+        engine
+            .state
+            .wifi_networks
+            .insert("11:22:33:44:55:66".into(), test_wifi());
+
+        let snap = build_snapshot(&engine, None);
+        assert_eq!(snap.interfaces.len(), 1);
+        assert_eq!(snap.hosts.len(), 1);
+        assert_eq!(snap.wifi_networks.len(), 1);
+    }
+
+    #[test]
+    fn build_snapshot_filters_by_interface() {
+        let engine = StateEngine::with_mocks(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+        engine
+            .state
+            .interfaces
+            .insert("en0".into(), test_iface());
+
+        let mut iface2 = test_iface();
+        iface2.name = "en4".into();
+        engine.state.interfaces.insert("en4".into(), iface2);
+
+        let snap = build_snapshot(&engine, Some("en0"));
+        assert_eq!(snap.interfaces.len(), 1);
+        assert_eq!(snap.interfaces[0].name, "en0");
+    }
+}

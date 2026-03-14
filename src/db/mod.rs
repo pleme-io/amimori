@@ -444,3 +444,148 @@ impl StorageBackend for Database {
         self.load_all().await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    // ── row_to_host_info ───────────────────────────────────────────────
+
+    fn make_host_model(ipv4: &str, ipv6: &str) -> entity::host::Model {
+        entity::host::Model {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: "Apple".into(),
+            ipv4_json: ipv4.into(),
+            ipv6_json: ipv6.into(),
+            hostname: Some("test".into()),
+            os_hint: None,
+            interface: "en0".into(),
+            network_id: "10.0.0.1|255.255.255.0".into(),
+            first_seen: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            last_seen: Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn row_to_host_info_basic() {
+        let row = make_host_model(r#"["10.0.0.1"]"#, r#"["fe80::1"]"#);
+        let host = row_to_host_info(&row, &[]);
+        assert_eq!(host.mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(host.vendor, "Apple");
+        assert_eq!(host.addresses.len(), 2);
+        assert_eq!(host.hostname.as_deref(), Some("test"));
+        assert_eq!(host.network_id, "10.0.0.1|255.255.255.0");
+    }
+
+    #[test]
+    fn row_to_host_info_with_services() {
+        let row = make_host_model(r#"["10.0.0.1"]"#, "[]");
+        let services = vec![entity::service::Model {
+            id: 1,
+            host_mac: "aa:bb:cc:dd:ee:ff".into(),
+            port: 443,
+            protocol: "tcp".into(),
+            name: "https".into(),
+            version: "".into(),
+            state: "open".into(),
+        }];
+        let host = row_to_host_info(&row, &services);
+        assert_eq!(host.services.len(), 1);
+        assert_eq!(host.services[0].port, 443);
+        assert_eq!(host.services[0].name, "https");
+    }
+
+    #[test]
+    fn row_to_host_info_corrupt_json_returns_empty() {
+        let row = make_host_model("not valid json", "also bad");
+        let host = row_to_host_info(&row, &[]);
+        assert!(host.addresses.is_empty(), "corrupt JSON should produce empty addresses");
+    }
+
+    #[test]
+    fn row_to_host_info_empty_json_arrays() {
+        let row = make_host_model("[]", "[]");
+        let host = row_to_host_info(&row, &[]);
+        assert!(host.addresses.is_empty());
+    }
+
+    // ── row_to_interface_info ──────────────────────────────────────────
+
+    #[test]
+    fn row_to_interface_info_basic() {
+        let row = entity::interface::Model {
+            name: "en0".into(),
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ipv4_json: r#"["10.0.0.5"]"#.into(),
+            ipv6_json: "[]".into(),
+            gateway: "10.0.0.1".into(),
+            subnet: "255.255.255.0".into(),
+            is_up: true,
+            kind: "wifi".into(),
+            dns_json: r#"["8.8.8.8"]"#.into(),
+        };
+        let iface = row_to_interface_info(row);
+        assert_eq!(iface.name, "en0");
+        assert_eq!(iface.kind, InterfaceKind::Wifi);
+        assert!(iface.is_up);
+        assert_eq!(iface.ipv4.len(), 1);
+        assert_eq!(iface.dns, vec!["8.8.8.8"]);
+    }
+
+    #[test]
+    fn row_to_interface_info_unknown_kind_defaults_to_other() {
+        let row = entity::interface::Model {
+            name: "bridge0".into(),
+            mac: "".into(),
+            ipv4_json: "[]".into(),
+            ipv6_json: "[]".into(),
+            gateway: "".into(),
+            subnet: "".into(),
+            is_up: false,
+            kind: "bridge".into(),
+            dns_json: "[]".into(),
+        };
+        let iface = row_to_interface_info(row);
+        assert_eq!(iface.kind, InterfaceKind::Other);
+    }
+
+    #[test]
+    fn row_to_interface_info_corrupt_json() {
+        let row = entity::interface::Model {
+            name: "en0".into(),
+            mac: "".into(),
+            ipv4_json: "bad".into(),
+            ipv6_json: "bad".into(),
+            gateway: "".into(),
+            subnet: "".into(),
+            is_up: true,
+            kind: "wifi".into(),
+            dns_json: "bad".into(),
+        };
+        let iface = row_to_interface_info(row);
+        assert!(iface.ipv4.is_empty());
+        assert!(iface.ipv6.is_empty());
+        assert!(iface.dns.is_empty());
+    }
+
+    // ── row_to_wifi_info ───────────────────────────────────────────────
+
+    #[test]
+    fn row_to_wifi_info_basic() {
+        let row = entity::wifi_network::Model {
+            bssid: "11:22:33:44:55:66".into(),
+            ssid: "TestNet".into(),
+            rssi: -60,
+            noise: -90,
+            channel: 6,
+            band: "2.4GHz".into(),
+            security: "WPA2".into(),
+            interface: "en0".into(),
+        };
+        let wifi = row_to_wifi_info(row);
+        assert_eq!(wifi.ssid, "TestNet");
+        assert_eq!(wifi.channel, 6);
+        assert_eq!(wifi.rssi, -60);
+    }
+}
