@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::model::{HostInfo, InterfaceInfo, WifiInfo};
+use crate::model::{DeltaEvent, HostInfo, InterfaceInfo, WifiInfo};
 
 // ── Command execution ──────────────────────────────────────────────────────
 
@@ -89,6 +89,8 @@ pub trait StorageBackend: Send + Sync {
     async fn upsert_wifi(&self, wifi: &WifiInfo) -> anyhow::Result<()>;
     async fn remove_wifi(&self, bssid: &str) -> anyhow::Result<()>;
     async fn load_all(&self) -> anyhow::Result<(Vec<InterfaceInfo>, Vec<HostInfo>, Vec<WifiInfo>)>;
+    async fn append_event(&self, event: &DeltaEvent) -> anyhow::Result<()>;
+    async fn prune_events(&self, ttl_secs: u64) -> anyhow::Result<u64>;
 }
 
 // ── Gateway / DNS providers ────────────────────────────────────────────────
@@ -231,6 +233,14 @@ pub mod mocks {
             let hosts = self.hosts.lock().unwrap().values().cloned().collect();
             let wifi = self.wifi.lock().unwrap().values().cloned().collect();
             Ok((interfaces, hosts, wifi))
+        }
+
+        async fn append_event(&self, _event: &DeltaEvent) -> anyhow::Result<()> {
+            Ok(()) // no-op for tests — events are tested via the in-memory ring buffer
+        }
+
+        async fn prune_events(&self, _ttl_secs: u64) -> anyhow::Result<u64> {
+            Ok(0)
         }
     }
 

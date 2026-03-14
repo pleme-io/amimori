@@ -12,7 +12,7 @@ use sea_orm::{
 };
 use sea_orm_migration::MigratorTrait;
 
-use crate::model::{HostInfo, InterfaceInfo, InterfaceKind, ServiceInfo, WifiInfo};
+use crate::model::{Change, DeltaEvent, HostInfo, InterfaceInfo, InterfaceKind, ServiceInfo, WifiInfo};
 use crate::traits::StorageBackend;
 
 /// Persistent storage backed by SQLite via SeaORM.
@@ -317,6 +317,75 @@ impl Database {
         let wifi = self.all_wifi().await?;
         Ok((interfaces, hosts, wifi))
     }
+
+    // ── Event timeline ─────────────────────────────────────────────
+
+    /// Persist a delta event to the durable timeline.
+    pub async fn append_event(&self, event: &DeltaEvent) -> anyhow::Result<()> {
+        let (event_type, subject_mac, subject_name) = classify_change(&event.change);
+
+        let active = entity::event::ActiveModel {
+            id: sea_orm::ActiveValue::NotSet,
+            sequence: Set(event.sequence as i64),
+            timestamp: Set(event.timestamp),
+            event_type: Set(event_type.to_string()),
+            subject_mac: Set(subject_mac),
+            subject_name: Set(subject_name),
+            change_json: Set(serde_json::to_string(&event.change)?),
+        };
+        active.insert(&self.conn).await?;
+        Ok(())
+    }
+
+    /// Prune events older than `ttl_secs`. Returns count of deleted rows.
+    pub async fn prune_events(&self, ttl_secs: u64) -> anyhow::Result<u64> {
+        if ttl_secs == 0 {
+            return Ok(0);
+        }
+        let cutoff = Utc::now() - chrono::Duration::seconds(ttl_secs as i64);
+        let result = entity::event::Entity::delete_many()
+            .filter(entity::event::Column::Timestamp.lt(cutoff))
+            .exec(&self.conn)
+            .await?;
+        Ok(result.rows_affected)
+    }
+}
+
+/// Extract event classification from a Change for indexed querying.
+fn classify_change(change: &Change) -> (&'static str, String, String) {
+    match change {
+        Change::HostAdded(h) => (
+            "host_added",
+            h.mac.clone(),
+            h.hostname.clone().unwrap_or_default(),
+        ),
+        Change::HostRemoved { mac } => ("host_removed", mac.clone(), String::new()),
+        Change::HostUpdated(h) => (
+            "host_updated",
+            h.mac.clone(),
+            h.hostname.clone().unwrap_or_default(),
+        ),
+        Change::ServiceChanged {
+            mac,
+            service,
+            change_type,
+        } => (
+            match change_type {
+                crate::model::ChangeType::Added => "service_added",
+                crate::model::ChangeType::Removed => "service_removed",
+                crate::model::ChangeType::Updated => "service_updated",
+            },
+            mac.clone(),
+            format!("{}/{}", service.port, service.protocol),
+        ),
+        Change::WifiAdded(w) => ("wifi_added", w.bssid.clone(), w.ssid.clone()),
+        Change::WifiRemoved { bssid } => ("wifi_removed", bssid.clone(), String::new()),
+        Change::WifiUpdated(w) => ("wifi_updated", w.bssid.clone(), w.ssid.clone()),
+        Change::InterfaceChanged(i) => ("interface_changed", String::new(), i.name.clone()),
+        Change::NetworkChanged { interface, .. } => {
+            ("network_changed", String::new(), interface.clone())
+        }
+    }
 }
 
 // ── Conversion helpers ─────────────────────────────────────────────────────
@@ -442,6 +511,14 @@ impl StorageBackend for Database {
 
     async fn load_all(&self) -> anyhow::Result<(Vec<InterfaceInfo>, Vec<HostInfo>, Vec<WifiInfo>)> {
         self.load_all().await
+    }
+
+    async fn append_event(&self, event: &DeltaEvent) -> anyhow::Result<()> {
+        self.append_event(event).await
+    }
+
+    async fn prune_events(&self, ttl_secs: u64) -> anyhow::Result<u64> {
+        self.prune_events(ttl_secs).await
     }
 }
 

@@ -597,7 +597,11 @@ impl StateEngine {
                     () = cancel.cancelled() => break,
                     _ = interval.tick() => {
                         if let Err(e) = engine.prune_stale_hosts(ttl_secs).await {
-                            tracing::error!(error = %e, "pruning failed");
+                            tracing::error!(error = %e, "host pruning failed");
+                        }
+                        // Prune old events with same TTL as hosts
+                        if let Err(e) = engine.db.prune_events(ttl_secs).await {
+                            tracing::error!(error = %e, "event pruning failed");
                         }
                     }
                 }
@@ -628,6 +632,12 @@ impl StateEngine {
             change,
         };
 
+        // Persist to durable timeline (survives restarts)
+        if let Err(e) = self.db.append_event(&event).await {
+            tracing::warn!(seq, error = %e, "failed to persist event to timeline");
+        }
+
+        // In-memory ring buffer for gRPC streaming
         {
             let mut log = self.event_log.write().await;
             if log.len() >= self.buffer_size {
@@ -636,6 +646,7 @@ impl StateEngine {
             log.push_back(event.clone());
         }
 
+        // Fan-out to live subscribers
         {
             let mut subs = self.subscribers.write().await;
             subs.retain(|tx| !tx.is_closed());
