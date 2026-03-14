@@ -11,6 +11,7 @@ mod mcp;
 mod model;
 mod platform;
 mod state;
+mod topology;
 #[allow(dead_code)]
 mod traits;
 

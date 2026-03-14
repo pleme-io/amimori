@@ -5,6 +5,7 @@ pub mod dns;
 pub mod interface;
 pub mod lldp;
 pub mod mdns;
+pub mod netbios;
 pub mod passive;
 pub mod scanner;
 pub mod ssdp;

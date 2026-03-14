@@ -194,6 +194,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     ));
     tracing::info!("LLDP/CDP passive capture enabled");
 
+    // NetBIOS/SMB — discover Windows hosts, domains, shares.
+    // Safety level 2 (discovery, UDP 137 + TCP 445).
+    actors.push((
+        Box::new(collector::netbios::NetbiosCollector::new(&config, Arc::clone(&engine))),
+        ActorConfig::interval_only(),
+    ));
+    tracing::info!("NetBIOS/SMB fingerprinting enabled");
+
     if actors.is_empty() {
         anyhow::bail!(
             "no collector actors could be initialized — check config and tool availability"

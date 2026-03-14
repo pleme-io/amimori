@@ -277,6 +277,48 @@ impl AmimoriMcp {
         }
     }
 
+    #[tool(description = "Show network topology — subnets, gateways, host distribution")]
+    async fn network_topology(&self, Parameters(_): Parameters<EmptyInput>) -> String {
+        let mut client = self.client();
+
+        match client.get_snapshot(proto::SnapshotRequest::default()).await {
+            Ok(resp) => {
+                let snapshot = resp.into_inner();
+
+                let hosts: Vec<crate::model::HostInfo> = snapshot.hosts.iter().map(|h| {
+                    crate::model::HostInfo {
+                        mac: h.mac.clone(),
+                        vendor: h.vendor.clone(),
+                        addresses: h.ipv4.iter().chain(h.ipv6.iter())
+                            .filter_map(|s| s.parse().ok()).collect(),
+                        hostname: if h.hostname.is_empty() { None } else { Some(h.hostname.clone()) },
+                        os_hint: None, services: vec![], fingerprints: vec![],
+                        interface: h.interface.clone(), network_id: String::new(),
+                        first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+                    }
+                }).collect();
+
+                let interfaces: Vec<crate::model::InterfaceInfo> = snapshot.interfaces.iter().map(|i| {
+                    crate::model::InterfaceInfo {
+                        name: i.name.clone(),
+                        mac: i.mac.clone(),
+                        ipv4: i.ipv4.iter().filter_map(|s| s.parse().ok()).collect(),
+                        ipv6: i.ipv6.iter().filter_map(|s| s.parse().ok()).collect(),
+                        gateway: i.gateway.clone(),
+                        subnet: i.subnet.clone(),
+                        is_up: i.is_up,
+                        kind: crate::model::InterfaceKind::from_name(&i.name),
+                        dns: i.dns.clone(),
+                    }
+                }).collect();
+
+                let topo = crate::topology::build_topology(&hosts, &interfaces);
+                crate::topology::format_topology(&topo)
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
     #[tool(description = "Get profiler daemon health, statistics, and configuration")]
     async fn network_stats(&self, Parameters(_): Parameters<EmptyInput>) -> String {
         let mut client = self.client();
