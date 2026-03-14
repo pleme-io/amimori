@@ -235,7 +235,205 @@ mod tests {
         assert!(CAPTURE_DURATION.as_secs() >= 5);
     }
 
-    // Note: Actual packet capture tests require root and a live interface.
+    /// Build a minimal Ethernet + IPv4 + TCP SYN packet for testing.
+    fn make_tcp_syn_packet(src_ip: [u8; 4], ttl: u8, window: u16) -> Vec<u8> {
+        let mut pkt = Vec::with_capacity(54);
+        // Ethernet header (14 bytes)
+        pkt.extend_from_slice(&[0xff; 6]); // dst MAC
+        pkt.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]); // src MAC
+        pkt.extend_from_slice(&[0x08, 0x00]); // EtherType: IPv4
+
+        // IPv4 header (20 bytes)
+        pkt.push(0x45); // version=4, ihl=5
+        pkt.push(0x00); // DSCP/ECN
+        pkt.extend_from_slice(&40u16.to_be_bytes()); // total length (20 IP + 20 TCP)
+        pkt.extend_from_slice(&[0x00, 0x00]); // identification
+        pkt.extend_from_slice(&[0x40, 0x00]); // flags=DF, fragment offset=0
+        pkt.push(ttl);
+        pkt.push(6); // protocol: TCP
+        pkt.extend_from_slice(&[0x00, 0x00]); // checksum (0 = skip)
+        pkt.extend_from_slice(&src_ip); // src IP
+        pkt.extend_from_slice(&[10, 0, 0, 1]); // dst IP
+
+        // TCP header (20 bytes)
+        pkt.extend_from_slice(&12345u16.to_be_bytes()); // src port
+        pkt.extend_from_slice(&80u16.to_be_bytes()); // dst port
+        pkt.extend_from_slice(&1u32.to_be_bytes()); // sequence number
+        pkt.extend_from_slice(&0u32.to_be_bytes()); // ack number
+        pkt.push(0x50); // data offset=5 (20 bytes), reserved=0
+        pkt.push(0x02); // flags: SYN only (bit 1)
+        pkt.extend_from_slice(&window.to_be_bytes()); // window size
+        pkt.extend_from_slice(&[0x00, 0x00]); // checksum
+        pkt.extend_from_slice(&[0x00, 0x00]); // urgent pointer
+
+        pkt
+    }
+
+    #[test]
+    fn analyze_packet_extracts_ttl_and_window() {
+        use crate::config::FilterConfig;
+        use crate::traits::mocks::{InMemoryStorage, MockVendorLookup};
+        use std::sync::Arc;
+
+        let engine = StateEngine::with_mocks(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+
+        // Pre-populate a host so the IP→MAC lookup succeeds
+        let ip: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        engine.state.hosts.insert("aa:bb:cc:dd:ee:ff".into(), crate::model::HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: String::new(),
+            addresses: vec![ip],
+            hostname: None, os_hint: None, services: vec![], fingerprints: vec![],
+            interface: "en0".into(), network_id: String::new(),
+            first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+        });
+        engine.state.ip_to_mac.insert(ip, "aa:bb:cc:dd:ee:ff".into());
+
+        let pkt = make_tcp_syn_packet([10, 0, 0, 5], 64, 65535);
+        let mut seen = std::collections::HashSet::new();
+
+        let result = analyze_packet(&pkt, &engine, &mut seen);
+        assert!(result.is_some(), "should extract fingerprints from valid SYN");
+        let r = result.unwrap();
+        assert_eq!(r.mac, "aa:bb:cc:dd:ee:ff");
+
+        // Check TTL → OS family fingerprint
+        assert!(r.fingerprints.iter().any(|f|
+            f.key == "family" && f.value == "Linux/macOS/iOS"
+        ), "TTL 64 should map to Linux/macOS");
+
+        // Check TTL raw value
+        assert!(r.fingerprints.iter().any(|f|
+            f.key == "ttl" && f.value == "64"
+        ));
+
+        // Check window size
+        assert!(r.fingerprints.iter().any(|f|
+            f.key == "tcp_window" && f.value == "65535"
+        ));
+    }
+
+    #[test]
+    fn analyze_packet_windows_ttl() {
+        use crate::config::FilterConfig;
+        use crate::traits::mocks::{InMemoryStorage, MockVendorLookup};
+        use std::sync::Arc;
+
+        let engine = StateEngine::with_mocks(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+        let ip: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        engine.state.hosts.insert("aa:bb:cc:dd:ee:ff".into(), crate::model::HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
+            addresses: vec![ip], hostname: None, os_hint: None,
+            services: vec![], fingerprints: vec![], interface: "en0".into(),
+            network_id: String::new(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+        });
+        engine.state.ip_to_mac.insert(ip, "aa:bb:cc:dd:ee:ff".into());
+
+        let pkt = make_tcp_syn_packet([10, 0, 0, 5], 128, 8192);
+        let mut seen = std::collections::HashSet::new();
+        let result = analyze_packet(&pkt, &engine, &mut seen).unwrap();
+        assert!(result.fingerprints.iter().any(|f| f.value == "Windows"));
+    }
+
+    #[test]
+    fn analyze_packet_skips_non_syn() {
+        use crate::config::FilterConfig;
+        use crate::traits::mocks::{InMemoryStorage, MockVendorLookup};
+        use std::sync::Arc;
+
+        let engine = StateEngine::with_mocks(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+        let ip: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        engine.state.hosts.insert("aa:bb:cc:dd:ee:ff".into(), crate::model::HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
+            addresses: vec![ip], hostname: None, os_hint: None,
+            services: vec![], fingerprints: vec![], interface: "en0".into(),
+            network_id: String::new(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+        });
+        engine.state.ip_to_mac.insert(ip, "aa:bb:cc:dd:ee:ff".into());
+
+        // SYN+ACK (flags = 0x12) — should be skipped
+        let mut pkt = make_tcp_syn_packet([10, 0, 0, 5], 64, 65535);
+        pkt[47] = 0x12; // SYN+ACK
+        let mut seen = std::collections::HashSet::new();
+        assert!(analyze_packet(&pkt, &engine, &mut seen).is_none());
+    }
+
+    #[test]
+    fn analyze_packet_skips_unknown_ip() {
+        use crate::config::FilterConfig;
+        use crate::traits::mocks::{InMemoryStorage, MockVendorLookup};
+        use std::sync::Arc;
+
+        let engine = StateEngine::with_mocks(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+        // No hosts in state — IP won't resolve
+        let pkt = make_tcp_syn_packet([10, 0, 0, 99], 64, 65535);
+        let mut seen = std::collections::HashSet::new();
+        assert!(analyze_packet(&pkt, &engine, &mut seen).is_none());
+    }
+
+    #[test]
+    fn analyze_packet_deduplicates_by_ip() {
+        use crate::config::FilterConfig;
+        use crate::traits::mocks::{InMemoryStorage, MockVendorLookup};
+        use std::sync::Arc;
+
+        let engine = StateEngine::with_mocks(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+        let ip: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        engine.state.hosts.insert("aa:bb:cc:dd:ee:ff".into(), crate::model::HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
+            addresses: vec![ip], hostname: None, os_hint: None,
+            services: vec![], fingerprints: vec![], interface: "en0".into(),
+            network_id: String::new(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+        });
+        engine.state.ip_to_mac.insert(ip, "aa:bb:cc:dd:ee:ff".into());
+
+        let pkt = make_tcp_syn_packet([10, 0, 0, 5], 64, 65535);
+        let mut seen = std::collections::HashSet::new();
+        assert!(analyze_packet(&pkt, &engine, &mut seen).is_some());
+        // Second packet from same IP — should be deduplicated
+        assert!(analyze_packet(&pkt, &engine, &mut seen).is_none());
+    }
+
+    #[test]
+    fn analyze_packet_too_short() {
+        use crate::config::FilterConfig;
+        use crate::traits::mocks::{InMemoryStorage, MockVendorLookup};
+        use std::sync::Arc;
+
+        let engine = StateEngine::with_mocks(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+        let mut seen = std::collections::HashSet::new();
+        assert!(analyze_packet(&[0, 1, 2], &engine, &mut seen).is_none());
+    }
     // The analyze_packet function is tested via integration tests.
     // Unit tests here validate configuration and constants only.
 }

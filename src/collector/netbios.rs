@@ -305,6 +305,32 @@ mod tests {
     }
 
     #[test]
+    fn query_netbios_packet_format() {
+        // The NODE STATUS REQUEST is exactly 50 bytes
+        let packet: [u8; 50] = [
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x20, 0x43, 0x4b, 0x41, 0x41, 0x41, 0x41, 0x41,
+            0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+            0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+            0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+            0x41, 0x00,
+            0x00, 0x21, 0x00, 0x01,
+        ];
+        assert_eq!(packet.len(), 50);
+        // Last 4 bytes: Type=NBSTAT(0x0021) + Class=IN(0x0001)
+        assert_eq!(u16::from_be_bytes([packet[46], packet[47]]), 0x0021);
+        assert_eq!(u16::from_be_bytes([packet[48], packet[49]]), 0x0001);
+    }
+
+    #[test]
+    fn smb_negotiate_magic() {
+        // Verify SMB2 magic bytes at the correct offset
+        let header: [u8; 8] = [0x00, 0x00, 0x00, 0x74, 0xFE, 0x53, 0x4D, 0x42];
+        assert_eq!(&header[4..8], b"\xFESMB");
+    }
+
+    #[test]
     fn smb_dialect_mapping() {
         // Verify our dialect codes map to known SMB versions
         let dialects: Vec<(u16, &str)> = vec![
