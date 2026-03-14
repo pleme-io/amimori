@@ -251,10 +251,31 @@ pub struct NmapHost {
 
 // ── MAC address utilities ──────────────────────────────────────────────────
 
+/// Returns true if this MAC is broadcast, multicast, or otherwise
+/// not a real unicast host that should appear in the host table.
+///
+/// Filters: broadcast (ff:ff:ff:ff:ff:ff), IPv4 multicast (01:00:5e:*),
+/// IPv6 multicast (33:33:*), zero MAC, and locally-administered group addresses.
+pub fn is_non_host_mac(mac: &str) -> bool {
+    if mac == "ff:ff:ff:ff:ff:ff" || mac == "00:00:00:00:00:00" {
+        return true;
+    }
+    // Multicast: first octet has the group bit (bit 0) set
+    if let Some(first_octet) = mac.split(':').next() {
+        if let Ok(byte) = u8::from_str_radix(first_octet, 16) {
+            if byte & 0x01 != 0 {
+                return true; // multicast/group address
+            }
+        }
+    }
+    false
+}
+
 /// Normalize a MAC/BSSID to lowercase colon-separated format with zero-padded octets.
 ///
-/// Returns `None` if the input isn't a valid MAC (wrong octet count, non-hex chars,
-/// or empty octets). This prevents garbage MACs from silently entering the system.
+/// Returns `None` if the input isn't a valid unicast MAC. Rejects:
+/// - Wrong octet count, non-hex chars, empty octets
+/// - Broadcast, multicast, and zero MACs
 ///
 /// Examples: `"a:B:c:D:e:F"` → `Some("0a:0b:0c:0d:0e:0f")`
 pub fn normalize_mac(mac: &str) -> Option<String> {
@@ -277,6 +298,9 @@ pub fn normalize_mac(mac: &str) -> Option<String> {
         for c in octet.chars() {
             out.push(c.to_ascii_lowercase());
         }
+    }
+    if is_non_host_mac(&out) {
+        return None;
     }
     Some(out)
 }
@@ -370,6 +394,56 @@ mod tests {
             normalize_mac("aA:Bb:cC:Dd:eE:fF").as_deref(),
             Some("aa:bb:cc:dd:ee:ff")
         );
+    }
+
+    // ── Non-host MAC filtering (broadcast, multicast, zero) ───────────
+
+    #[test]
+    fn normalize_mac_rejects_broadcast() {
+        assert!(normalize_mac("ff:ff:ff:ff:ff:ff").is_none());
+    }
+
+    #[test]
+    fn normalize_mac_rejects_zero() {
+        assert!(normalize_mac("00:00:00:00:00:00").is_none());
+    }
+
+    #[test]
+    fn normalize_mac_rejects_ipv4_multicast() {
+        // 01:00:5e:* — IPv4 multicast
+        assert!(normalize_mac("01:00:5e:00:00:fb").is_none());
+    }
+
+    #[test]
+    fn normalize_mac_rejects_ipv6_multicast() {
+        // 33:33:* — IPv6 multicast (first octet 0x33 has group bit set)
+        assert!(normalize_mac("33:33:00:00:00:01").is_none());
+    }
+
+    #[test]
+    fn normalize_mac_accepts_unicast() {
+        // Normal unicast MAC (first octet even = unicast)
+        assert!(normalize_mac("84:69:93:7e:33:fe").is_some());
+    }
+
+    #[test]
+    fn is_non_host_mac_broadcast() {
+        assert!(is_non_host_mac("ff:ff:ff:ff:ff:ff"));
+    }
+
+    #[test]
+    fn is_non_host_mac_multicast_group_bit() {
+        // First octet 0x01 has bit 0 set = group/multicast
+        assert!(is_non_host_mac("01:00:5e:00:00:fb"));
+        // First octet 0x33 has bit 0 set
+        assert!(is_non_host_mac("33:33:ff:00:00:01"));
+    }
+
+    #[test]
+    fn is_non_host_mac_unicast() {
+        // Even first octet = unicast
+        assert!(!is_non_host_mac("84:69:93:7e:33:fe"));
+        assert!(!is_non_host_mac("aa:bb:cc:dd:ee:ff")); // 0xaa = 1010_1010, bit 0 = 0
     }
 
     // ── InterfaceInfo::cidr() ──────────────────────────────────────────

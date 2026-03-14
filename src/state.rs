@@ -134,6 +134,14 @@ impl StateEngine {
 
     // ── Apply methods ──────────────────────────────────────────────────
 
+    /// Check if a MAC belongs to one of our own monitored interfaces.
+    fn is_self_mac(&self, mac: &str) -> bool {
+        self.state
+            .interfaces
+            .iter()
+            .any(|e| e.value().mac == mac)
+    }
+
     pub async fn apply_arp_results(&self, entries: &[ArpEntry]) -> anyhow::Result<()> {
         let now = Utc::now();
 
@@ -142,7 +150,10 @@ impl StateEngine {
                 continue;
             };
 
-            if self.filters.should_exclude_mac(&mac) || self.filters.should_exclude_ip(&entry.ip) {
+            if self.is_self_mac(&mac)
+                || self.filters.should_exclude_mac(&mac)
+                || self.filters.should_exclude_ip(&entry.ip)
+            {
                 continue;
             }
 
@@ -405,7 +416,7 @@ impl StateEngine {
                 continue;
             };
 
-            if self.filters.should_exclude_mac(&mac) {
+            if self.is_self_mac(&mac) || self.filters.should_exclude_mac(&mac) {
                 continue;
             }
 
@@ -971,7 +982,7 @@ mod tests {
         let engine = make_engine(FilterConfig::default());
         engine
             .apply_wifi_scan(&[
-                wifi("Net1", "11:11:11:11:11:11", -60),
+                wifi("Net1", "10:11:11:11:11:11", -60),
                 wifi("Net2", "22:22:22:22:22:22", -70),
             ])
             .await
@@ -981,7 +992,7 @@ mod tests {
         let mut rx = engine.subscribe().await;
         // Second scan only has Net1 — Net2 vanished
         engine
-            .apply_wifi_scan(&[wifi("Net1", "11:11:11:11:11:11", -60)])
+            .apply_wifi_scan(&[wifi("Net1", "10:11:11:11:11:11", -60)])
             .await
             .unwrap();
 
@@ -1126,9 +1137,9 @@ mod tests {
         let engine = make_engine(FilterConfig::default());
         engine
             .apply_arp_results(&[
-                arp_entry("11:11:11:11:11:11", "10.0.0.1", "en0"),
+                arp_entry("10:11:11:11:11:11", "10.0.0.1", "en0"),
                 arp_entry("22:22:22:22:22:22", "10.0.0.2", "en0"),
-                arp_entry("33:33:33:33:33:33", "10.0.0.3", "en0"),
+                arp_entry("30:33:33:33:33:33", "10.0.0.3", "en0"),
             ])
             .await
             .unwrap();
@@ -1144,7 +1155,7 @@ mod tests {
         let engine = make_engine(FilterConfig::default());
         engine
             .apply_arp_results(&[
-                arp_entry("11:11:11:11:11:11", "10.0.0.1", "en0"),
+                arp_entry("10:11:11:11:11:11", "10.0.0.1", "en0"),
                 arp_entry("22:22:22:22:22:22", "10.0.0.2", "en0"),
             ])
             .await
@@ -1207,7 +1218,7 @@ mod tests {
         engine
             .apply_arp_results(&[
                 arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.2", "en0"),
-                arp_entry("11:22:33:44:55:66", "10.0.0.3", "en0"),
+                arp_entry("10:22:33:44:55:66", "10.0.0.3", "en0"),
             ])
             .await
             .unwrap();
@@ -1363,11 +1374,11 @@ mod tests {
 
         // New host on network B
         engine
-            .apply_arp_results(&[arp_entry("bb:cc:dd:ee:ff:00", "192.168.1.50", "en0")])
+            .apply_arp_results(&[arp_entry("ba:cc:dd:ee:ff:00", "192.168.1.50", "en0")])
             .await
             .unwrap();
 
-        let host = engine.state.hosts.get("bb:cc:dd:ee:ff:00").unwrap();
+        let host = engine.state.hosts.get("ba:cc:dd:ee:ff:00").unwrap();
         assert_eq!(
             host.network_id, "192.168.1.1|255.255.255.0",
             "host on new network should have new network_id"
@@ -1406,7 +1417,7 @@ mod tests {
         engine
             .apply_arp_results(&[
                 arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.2", "en0"),
-                arp_entry("11:22:33:44:55:66", "10.0.0.3", "en0"),
+                arp_entry("10:22:33:44:55:66", "10.0.0.3", "en0"),
             ])
             .await
             .unwrap();
@@ -1443,7 +1454,7 @@ mod tests {
         engine
             .apply_arp_results(&[
                 arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.2", "en0"),
-                arp_entry("11:22:33:44:55:66", "192.168.1.2", "en4"),
+                arp_entry("10:22:33:44:55:66", "192.168.1.2", "en4"),
             ])
             .await
             .unwrap();
@@ -1461,7 +1472,7 @@ mod tests {
         // Only en0's host should be cleared; en4's host survives
         assert_eq!(engine.state.hosts.len(), 1);
         assert!(
-            engine.state.hosts.get("11:22:33:44:55:66").is_some(),
+            engine.state.hosts.get("10:22:33:44:55:66").is_some(),
             "en4's host should survive en0's network transition"
         );
         assert!(
@@ -1491,14 +1502,14 @@ mod tests {
         engine
             .apply_arp_results(&[
                 arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.2", "en0"),
-                arp_entry("11:22:33:44:55:66", "10.0.0.3", "en0"),
+                arp_entry("10:22:33:44:55:66", "10.0.0.3", "en0"),
             ])
             .await
             .unwrap();
         engine
             .apply_arp_results(&[
                 arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.2", "en0"),
-                arp_entry("11:22:33:44:55:66", "10.0.0.3", "en0"),
+                arp_entry("10:22:33:44:55:66", "10.0.0.3", "en0"),
                 arp_entry("22:33:44:55:66:77", "10.0.0.4", "en0"),
             ])
             .await

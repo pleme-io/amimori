@@ -7,6 +7,7 @@ mod event_bus;
 mod grpc;
 mod mcp;
 mod model;
+mod platform;
 mod state;
 #[allow(dead_code)]
 mod traits;

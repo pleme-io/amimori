@@ -110,7 +110,7 @@ fn build_interface_info(
 /// Uses absolute path — netstat lives at /usr/sbin which may not be in
 /// the daemon's restricted PATH (launchd only includes nix store paths).
 async fn parse_gateways() -> HashMap<String, String> {
-    let Ok(output) = tokio::process::Command::new("/usr/sbin/netstat")
+    let Ok(output) = tokio::process::Command::new(crate::platform::system_bin("netstat"))
         .args(["-rn"])
         .output()
         .await
@@ -125,7 +125,7 @@ async fn parse_gateways() -> HashMap<String, String> {
 /// Run `scutil --dns` and parse DNS servers.
 /// Uses absolute path — scutil lives at /usr/sbin.
 async fn parse_dns_servers() -> HashMap<String, Vec<String>> {
-    let Ok(output) = tokio::process::Command::new("/usr/sbin/scutil")
+    let Ok(output) = tokio::process::Command::new(crate::platform::system_bin("scutil"))
         .args(["--dns"])
         .output()
         .await
@@ -161,6 +161,9 @@ pub fn parse_netstat_gateways(output: &str) -> HashMap<String, String> {
 }
 
 /// Parse `scutil --dns` output to extract DNS servers per interface. Pure function.
+///
+/// Deduplicates servers — macOS lists many resolver stanzas for the same
+/// interface (dnsmasq, mDNS, scoped queries), each with the same nameserver.
 pub fn parse_scutil_dns(output: &str) -> HashMap<String, Vec<String>> {
     let mut dns_map: HashMap<String, Vec<String>> = HashMap::new();
     let mut current_iface = String::new();
@@ -171,10 +174,14 @@ pub fn parse_scutil_dns(output: &str) -> HashMap<String, Vec<String>> {
 
         if trimmed.starts_with("resolver") {
             if !current_iface.is_empty() && !current_servers.is_empty() {
-                dns_map
+                let entry = dns_map
                     .entry(std::mem::take(&mut current_iface))
-                    .or_default()
-                    .extend(current_servers.drain(..));
+                    .or_default();
+                for server in current_servers.drain(..) {
+                    if !entry.contains(&server) {
+                        entry.push(server);
+                    }
+                }
             }
             current_iface.clear();
         } else if let Some(iface) = trimmed.strip_prefix("if_index : ") {
@@ -189,10 +196,12 @@ pub fn parse_scutil_dns(output: &str) -> HashMap<String, Vec<String>> {
     }
 
     if !current_iface.is_empty() && !current_servers.is_empty() {
-        dns_map
-            .entry(current_iface)
-            .or_default()
-            .extend(current_servers);
+        let entry = dns_map.entry(current_iface).or_default();
+        for server in current_servers {
+            if !entry.contains(&server) {
+                entry.push(server);
+            }
+        }
     }
 
     dns_map
@@ -349,5 +358,29 @@ resolver #2
         assert_eq!(servers.len(), 2);
         assert!(servers.contains(&"10.0.0.1".to_string()));
         assert!(servers.contains(&"8.8.8.8".to_string()));
+    }
+
+    #[test]
+    fn parse_dns_deduplicates_repeated_servers() {
+        // macOS often lists 127.0.0.1 in dozens of resolver stanzas
+        // (dnsmasq, mDNS, scoped queries). Must deduplicate.
+        let output = "resolver #1
+  nameserver[0] : 127.0.0.1
+  if_index : 14 (en0)
+resolver #2
+  nameserver[0] : 127.0.0.1
+  if_index : 14 (en0)
+resolver #3
+  nameserver[0] : 127.0.0.1
+  if_index : 14 (en0)
+resolver #4
+  nameserver[0] : 100.100.100.100
+  if_index : 14 (en0)";
+
+        let dns = parse_scutil_dns(output);
+        let servers = dns.get("en0").unwrap();
+        assert_eq!(servers.len(), 2); // NOT 4
+        assert_eq!(servers[0], "127.0.0.1");
+        assert_eq!(servers[1], "100.100.100.100");
     }
 }

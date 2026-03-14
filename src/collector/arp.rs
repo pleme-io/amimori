@@ -37,7 +37,7 @@ impl Collector for ArpCollector {
     }
 
     async fn collect(&self) -> anyhow::Result<CollectorOutput> {
-        let output = tokio::process::Command::new("/usr/sbin/arp")
+        let output = tokio::process::Command::new(crate::platform::system_bin("arp"))
             .arg("-a")
             .output()
             .await?;
@@ -128,9 +128,9 @@ mod tests {
     #[test]
     fn parse_standard_arp_output() {
         let output = "? (10.0.0.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n\
-                       router.local (10.0.0.254) at 11:22:33:44:55:66 on en0 ifscope [ethernet]\n\
+                       router.local (10.0.0.254) at 10:22:33:44:55:66 on en0 ifscope [ethernet]\n\
                        ? (10.0.0.5) at (incomplete) on en0 ifscope [ethernet]\n\
-                       ? (192.168.1.1) at a1:b2:c3:d4:e5:f6 on en4 ifscope [ethernet]";
+                       ? (192.168.1.1) at a0:b2:c3:d4:e5:f6 on en4 ifscope [ethernet]";
 
         let entries = parse_arp_output(output, &["en0".to_string()]);
         assert_eq!(entries.len(), 2);
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn parse_with_all_interfaces() {
         let output = "? (10.0.0.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n\
-                       ? (192.168.1.1) at 11:22:33:44:55:66 on en4 ifscope [ethernet]";
+                       ? (192.168.1.1) at 10:22:33:44:55:66 on en4 ifscope [ethernet]";
         let entries = parse_arp_output(output, &[]);
         assert_eq!(entries.len(), 2);
     }
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn interface_filter_excludes_unmonitored() {
         let output = "? (10.0.0.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n\
-                       ? (10.0.0.2) at 11:22:33:44:55:66 on en4 ifscope [ethernet]";
+                       ? (10.0.0.2) at 10:22:33:44:55:66 on en4 ifscope [ethernet]";
         let entries = parse_arp_output(output, &["en4".to_string()]);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].interface, "en4");
@@ -220,10 +220,17 @@ mod tests {
     }
 
     #[test]
-    fn handles_multicast_addresses() {
+    fn rejects_multicast_addresses() {
+        // Multicast MACs (01:00:5e:* = IPv4 multicast) are filtered by normalize_mac
         let output = "? (224.0.0.251) at 01:00:5e:00:00:fb on en0 ifscope permanent [ethernet]";
         let entries = parse_arp_output(output, &[]);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].ip.to_string(), "224.0.0.251");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn rejects_broadcast_mac() {
+        let output = "? (10.20.223.255) at ff:ff:ff:ff:ff:ff on en0 ifscope [ethernet]";
+        let entries = parse_arp_output(output, &[]);
+        assert!(entries.is_empty());
     }
 }
