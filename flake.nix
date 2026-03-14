@@ -17,6 +17,10 @@
       url = "github:cachix/devenv";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    forge = {
+      url = "github:pleme-io/forge";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = {
@@ -26,9 +30,10 @@
     flake-utils,
     substrate,
     devenv,
+    forge,
   }:
     (import "${substrate}/lib/rust-tool-release-flake.nix" {
-      inherit nixpkgs crate2nix flake-utils devenv;
+      inherit nixpkgs crate2nix flake-utils devenv forge;
     }) {
       toolName = "amimori";
       src = self;
