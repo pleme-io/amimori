@@ -13,6 +13,7 @@ pub struct Model {
     pub is_up: bool,
     pub kind: String,
     pub dns_json: String, // JSON array
+    pub document_json: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

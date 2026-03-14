@@ -12,6 +12,7 @@ pub struct Model {
     pub band: String,
     pub security: String,
     pub interface: String,
+    pub document_json: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

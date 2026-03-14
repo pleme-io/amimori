@@ -241,6 +241,7 @@ impl Database {
     pub async fn upsert_interface(&self, iface: &InterfaceInfo) -> anyhow::Result<()> {
         let ipv4: Vec<String> = iface.ipv4.iter().map(ToString::to_string).collect();
         let ipv6: Vec<String> = iface.ipv6.iter().map(ToString::to_string).collect();
+        let document = serde_json::to_string(iface)?;
 
         let existing = entity::interface::Entity::find_by_id(&iface.name)
             .one(&self.conn)
@@ -256,6 +257,7 @@ impl Database {
             is_up: Set(iface.is_up),
             kind: Set(iface.kind.to_string()),
             dns_json: Set(serde_json::to_string(&iface.dns)?),
+            document_json: Set(Some(document)),
         };
 
         if existing.is_some() {
@@ -275,6 +277,8 @@ impl Database {
     // ── WiFi operations ────────────────────────────────────────────────
 
     pub async fn upsert_wifi(&self, wifi: &WifiInfo) -> anyhow::Result<()> {
+        let document = serde_json::to_string(wifi)?;
+
         let existing = entity::wifi_network::Entity::find_by_id(&wifi.bssid)
             .one(&self.conn)
             .await?;
@@ -288,6 +292,7 @@ impl Database {
             band: Set(wifi.band.clone()),
             security: Set(wifi.security.clone()),
             interface: Set(wifi.interface.clone()),
+            document_json: Set(Some(document)),
         };
 
         if existing.is_some() {
@@ -452,44 +457,46 @@ fn row_to_host_info(
 }
 
 fn row_to_interface_info(row: entity::interface::Model) -> InterfaceInfo {
-    let ipv4: Vec<String> = serde_json::from_str(&row.ipv4_json).unwrap_or_else(|e| {
-        tracing::warn!(name = %row.name, error = %e, "corrupt ipv4_json in database");
-        Vec::new()
-    });
-    let ipv6: Vec<String> = serde_json::from_str(&row.ipv6_json).unwrap_or_else(|e| {
-        tracing::warn!(name = %row.name, error = %e, "corrupt ipv6_json in database");
-        Vec::new()
-    });
-    let dns: Vec<String> = serde_json::from_str(&row.dns_json).unwrap_or_else(|e| {
-        tracing::warn!(name = %row.name, error = %e, "corrupt dns_json in database");
-        Vec::new()
-    });
+    // Prefer SSOT document when available
+    if let Some(ref doc) = row.document_json {
+        if let Ok(iface) = serde_json::from_str::<InterfaceInfo>(doc) {
+            return iface;
+        }
+    }
 
-    let ipv4_addrs = ipv4.iter().filter_map(|s| s.parse().ok()).collect();
-    let ipv6_addrs = ipv6.iter().filter_map(|s| s.parse().ok()).collect();
-
-    let kind = match row.kind.as_str() {
-        "wifi" => InterfaceKind::Wifi,
-        "ethernet" => InterfaceKind::Ethernet,
-        "tunnel" => InterfaceKind::Tunnel,
-        "loopback" => InterfaceKind::Loopback,
-        _ => InterfaceKind::Other,
-    };
+    // Fallback: assemble from relational columns
+    let ipv4: Vec<String> = serde_json::from_str(&row.ipv4_json).unwrap_or_default();
+    let ipv6: Vec<String> = serde_json::from_str(&row.ipv6_json).unwrap_or_default();
+    let dns: Vec<String> = serde_json::from_str(&row.dns_json).unwrap_or_default();
 
     InterfaceInfo {
         name: row.name,
         mac: row.mac,
-        ipv4: ipv4_addrs,
-        ipv6: ipv6_addrs,
+        ipv4: ipv4.iter().filter_map(|s| s.parse().ok()).collect(),
+        ipv6: ipv6.iter().filter_map(|s| s.parse().ok()).collect(),
         gateway: row.gateway,
         subnet: row.subnet,
         is_up: row.is_up,
-        kind,
+        kind: match row.kind.as_str() {
+            "wifi" => InterfaceKind::Wifi,
+            "ethernet" => InterfaceKind::Ethernet,
+            "tunnel" => InterfaceKind::Tunnel,
+            "loopback" => InterfaceKind::Loopback,
+            _ => InterfaceKind::Other,
+        },
         dns,
     }
 }
 
 fn row_to_wifi_info(row: entity::wifi_network::Model) -> WifiInfo {
+    // Prefer SSOT document when available
+    if let Some(ref doc) = row.document_json {
+        if let Ok(wifi) = serde_json::from_str::<WifiInfo>(doc) {
+            return wifi;
+        }
+    }
+
+    // Fallback: assemble from relational columns
     WifiInfo {
         ssid: row.ssid,
         bssid: row.bssid,
@@ -619,6 +626,7 @@ mod tests {
             is_up: true,
             kind: "wifi".into(),
             dns_json: r#"["8.8.8.8"]"#.into(),
+            document_json: None,
         };
         let iface = row_to_interface_info(row);
         assert_eq!(iface.name, "en0");
@@ -640,6 +648,7 @@ mod tests {
             is_up: false,
             kind: "bridge".into(),
             dns_json: "[]".into(),
+            document_json: None,
         };
         let iface = row_to_interface_info(row);
         assert_eq!(iface.kind, InterfaceKind::Other);
@@ -657,6 +666,7 @@ mod tests {
             is_up: true,
             kind: "wifi".into(),
             dns_json: "bad".into(),
+            document_json: None,
         };
         let iface = row_to_interface_info(row);
         assert!(iface.ipv4.is_empty());
@@ -748,6 +758,7 @@ mod tests {
             band: "2.4GHz".into(),
             security: "WPA2".into(),
             interface: "en0".into(),
+            document_json: None,
         };
         let wifi = row_to_wifi_info(row);
         assert_eq!(wifi.ssid, "TestNet");
