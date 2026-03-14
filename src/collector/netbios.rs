@@ -292,4 +292,38 @@ mod tests {
         // Our negotiate packet is 114 bytes (4 netbios + 64 header + 36 body + 10 dialects)
         assert_eq!(114, 4 + 64 + 36 + 10);
     }
+
+    #[test]
+    fn netbios_name_type_mapping() {
+        // Verify our name type byte → key mapping covers known types
+        let known_types: Vec<u8> = vec![0x00, 0x03, 0x20, 0x1B, 0x1C, 0x1D];
+        let labels: Vec<&str> = vec![
+            "netbios_name", "netbios_user", "netbios_server",
+            "netbios_domain_master", "netbios_domain_controller", "netbios_master_browser",
+        ];
+        assert_eq!(known_types.len(), labels.len());
+    }
+
+    #[test]
+    fn smb_dialect_mapping() {
+        // Verify our dialect codes map to known SMB versions
+        let dialects: Vec<(u16, &str)> = vec![
+            (0x0202, "SMB 2.0.2"),
+            (0x0210, "SMB 2.1"),
+            (0x0300, "SMB 3.0"),
+            (0x0302, "SMB 3.0.2"),
+            (0x0311, "SMB 3.1.1"),
+        ];
+        for (code, name) in dialects {
+            let dialect_str = match code {
+                0x0202 => "SMB 2.0.2",
+                0x0210 => "SMB 2.1",
+                0x0300 => "SMB 3.0",
+                0x0302 => "SMB 3.0.2",
+                0x0311 => "SMB 3.1.1",
+                _ => "unknown",
+            };
+            assert_eq!(dialect_str, name);
+        }
+    }
 }

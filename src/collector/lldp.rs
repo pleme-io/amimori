@@ -239,4 +239,59 @@ mod tests {
     fn format_mac_from_chassis_hostname() {
         assert_eq!(format_mac_from_chassis("switch1.local"), "");
     }
+
+    #[test]
+    fn parse_lldp_frame_basic() {
+        // Minimal LLDP TLV: chassis_id (type=1) + port_id (type=2) + sys_name (type=5) + end (type=0)
+        let now = chrono::Utc::now();
+        let mut data = Vec::new();
+
+        // Chassis ID TLV: type=1, len=7, subtype=4(MAC), "switch"
+        let chassis = b"switch";
+        let header = ((1u16 << 9) | (1 + chassis.len() as u16)).to_be_bytes();
+        data.extend_from_slice(&header);
+        data.push(4); // subtype MAC
+        data.extend_from_slice(chassis);
+
+        // Port ID TLV: type=2, len=4, subtype=5(ifName), "ge0"
+        let port = b"ge0";
+        let header = ((2u16 << 9) | (1 + port.len() as u16)).to_be_bytes();
+        data.extend_from_slice(&header);
+        data.push(5);
+        data.extend_from_slice(port);
+
+        // System Name TLV: type=5, len=7, "switch1"
+        let name = b"switch1";
+        let header = ((5u16 << 9) | name.len() as u16).to_be_bytes();
+        data.extend_from_slice(&header);
+        data.extend_from_slice(name);
+
+        // End TLV: type=0, len=0
+        data.extend_from_slice(&[0, 0]);
+
+        let result = parse_lldp_frame(&data, now);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.fingerprints.iter().any(|f| f.key == "sys_name" && f.value == "switch1"));
+    }
+
+    #[test]
+    fn parse_lldp_frame_empty() {
+        let now = chrono::Utc::now();
+        // Just end TLV
+        let data = [0u8, 0];
+        assert!(parse_lldp_frame(&data, now).is_none());
+    }
+
+    #[test]
+    fn parse_lldp_frame_too_short() {
+        let now = chrono::Utc::now();
+        assert!(parse_lldp_frame(&[0], now).is_none());
+    }
+
+    #[test]
+    fn parse_cdp_frame_too_short() {
+        let now = chrono::Utc::now();
+        assert!(parse_cdp_frame(&[0, 0], now).is_none());
+    }
 }

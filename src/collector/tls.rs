@@ -369,4 +369,43 @@ mod tests {
         assert!(TLS_PORTS.contains(&993));
         assert!(!TLS_PORTS.contains(&80));
     }
+
+    #[test]
+    fn extract_readable_cn_at_end() {
+        let text = "O=Test,CN=last.example.com";
+        assert_eq!(extract_readable_cn(text, "CN=").as_deref(), Some("last.example.com"));
+    }
+
+    #[test]
+    fn extract_readable_cn_with_spaces() {
+        // Stops at non-graphic chars
+        let text = "CN=my host";
+        assert_eq!(extract_readable_cn(text, "CN=").as_deref(), Some("my"));
+    }
+
+    #[test]
+    fn x509_parser_basic() {
+        let der = b"some/CN=test.local,O=TestOrg/other data";
+        let result = x509_parser(der);
+        assert!(result.is_ok());
+        let (_, cert) = result.unwrap();
+        assert_eq!(cert.subject, "test.local");
+    }
+
+    #[test]
+    fn x509_parser_no_cn() {
+        let der = b"no cn or org here just random bytes";
+        let result = x509_parser(der);
+        assert!(result.is_ok());
+        let (_, cert) = result.unwrap();
+        assert!(cert.subject.is_empty());
+    }
+
+    #[test]
+    fn tls_ports_no_duplicates() {
+        let mut sorted = TLS_PORTS.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), TLS_PORTS.len(), "TLS_PORTS has duplicates");
+    }
 }

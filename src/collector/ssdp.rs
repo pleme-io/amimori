@@ -227,4 +227,32 @@ mod tests {
         let xml = "<root><friendlyName></friendlyName></root>";
         assert!(extract_xml_value(xml, "friendlyName").is_none());
     }
+
+    #[test]
+    fn extract_xml_value_nested() {
+        let xml = "<root><device><manufacturer>Samsung</manufacturer></device></root>";
+        assert_eq!(extract_xml_value(xml, "manufacturer").as_deref(), Some("Samsung"));
+    }
+
+    #[test]
+    fn extract_xml_value_with_whitespace() {
+        let xml = "<root><modelName>  Smart TV  </modelName></root>";
+        assert_eq!(extract_xml_value(xml, "modelName").as_deref(), Some("Smart TV"));
+    }
+
+    #[test]
+    fn extract_xml_all_device_fields() {
+        let xml = r#"<root>
+            <friendlyName>Living Room</friendlyName>
+            <manufacturer>Sonos</manufacturer>
+            <modelName>One</modelName>
+            <serialNumber>SN123456</serialNumber>
+            <modelNumber>S18</modelNumber>
+        </root>"#;
+        assert_eq!(extract_xml_value(xml, "friendlyName").as_deref(), Some("Living Room"));
+        assert_eq!(extract_xml_value(xml, "manufacturer").as_deref(), Some("Sonos"));
+        assert_eq!(extract_xml_value(xml, "modelName").as_deref(), Some("One"));
+        assert_eq!(extract_xml_value(xml, "serialNumber").as_deref(), Some("SN123456"));
+        assert_eq!(extract_xml_value(xml, "modelNumber").as_deref(), Some("S18"));
+    }
 }

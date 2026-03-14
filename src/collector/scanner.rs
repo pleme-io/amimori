@@ -523,4 +523,44 @@ mod tests {
         assert_eq!(hosts[0].services.len(), 1, "invalid port ID should be skipped");
         assert_eq!(hosts[0].services[0].port, 22);
     }
+
+    #[test]
+    fn parse_nmap_completely_invalid_xml() {
+        let xml = "this is not xml at all {}[]<>";
+        let hosts = parse_nmap_xml(xml);
+        assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn parse_nmap_empty_string() {
+        assert!(parse_nmap_xml("").is_empty());
+    }
+
+    #[test]
+    fn parse_nmap_host_with_only_mac() {
+        // Host with MAC but no IP should be skipped
+        let xml = r#"<?xml version="1.0"?>
+<nmaprun>
+<host>
+<address addr="aa:bb:cc:dd:ee:ff" addrtype="mac"/>
+<hostnames><hostname name="myhost" type="PTR"/></hostnames>
+</host>
+</nmaprun>"#;
+        let hosts = parse_nmap_xml(xml);
+        assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn parse_nmap_truncated_xml() {
+        // Truncated mid-host — should not panic
+        let xml = r#"<?xml version="1.0"?>
+<nmaprun>
+<host>
+<address addr="10.0.0.1" addrtype="ipv4"/>
+<ports>
+<port protocol="tcp" portid="22">"#;
+        let hosts = parse_nmap_xml(xml);
+        // May or may not have the host depending on parser, but must not panic
+        assert!(hosts.len() <= 1);
+    }
 }

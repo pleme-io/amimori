@@ -395,6 +395,35 @@ mod tests {
     }
 
     #[test]
+    fn extract_version_rc() {
+        assert_eq!(extract_version("1.0-rc1"), "1.0-rc1");
+    }
+
+    #[test]
+    fn extract_version_with_prefix_text() {
+        assert_eq!(extract_version("version 3.2.1"), "3.2.1");
+    }
+
+    #[test]
+    fn derive_cpe_multiple_services() {
+        let mut host = make_host("aa:bb:cc:dd:ee:ff", "10.0.0.1", None);
+        host.services = vec![
+            ServiceInfo {
+                port: 22, protocol: "tcp".into(), name: "ssh".into(),
+                version: "OpenSSH 9.6".into(), state: "open".into(), banner: String::new(),
+            },
+            ServiceInfo {
+                port: 80, protocol: "tcp".into(), name: "nginx".into(),
+                version: "1.25.3".into(), state: "open".into(), banner: String::new(),
+            },
+        ];
+        let cpes = derive_cpe(&host);
+        assert!(cpes.len() >= 3); // 2 service CPEs + 1 OS CPE
+        assert!(cpes.iter().any(|c| c.value.contains("openssh")));
+        assert!(cpes.iter().any(|c| c.value.contains("nginx")));
+    }
+
+    #[test]
     fn derive_cpe_no_version_no_cpe() {
         let mut host = make_host("aa:bb:cc:dd:ee:ff", "10.0.0.1", None);
         host.services.push(ServiceInfo {

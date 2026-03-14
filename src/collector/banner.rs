@@ -261,4 +261,34 @@ mod tests {
     fn extract_http_server_empty_banner() {
         assert!(extract_http_server("").is_none());
     }
+
+    #[test]
+    fn extract_http_server_with_version_detail() {
+        let banner = "HTTP/1.1 200 OK\r\nServer: Apache/2.4.58 (Unix) OpenSSL/3.1.4\r\n";
+        assert_eq!(
+            extract_http_server(banner).as_deref(),
+            Some("Apache/2.4.58 (Unix) OpenSSL/3.1.4")
+        );
+    }
+
+    #[test]
+    fn extract_http_server_case_mixed() {
+        // Only exact "Server: " or "server: " prefix matches
+        let banner = "HTTP/1.1 200 OK\r\nSERVER: IIS/10.0\r\n";
+        assert!(extract_http_server(banner).is_none());
+    }
+
+    #[test]
+    fn banner_result_fields() {
+        let r = BannerResult {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ip: "10.0.0.1".into(),
+            port: 22,
+            protocol: "tcp".into(),
+            banner: "SSH-2.0-OpenSSH_9.6".into(),
+            fingerprints: vec![],
+        };
+        assert_eq!(r.port, 22);
+        assert!(!r.banner.is_empty());
+    }
 }

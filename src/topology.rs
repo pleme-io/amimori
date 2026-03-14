@@ -178,6 +178,58 @@ mod tests {
     }
 
     #[test]
+    fn build_topology_assigns_hosts_to_subnets() {
+        use crate::model::{InterfaceKind, InterfaceInfo, HostInfo};
+        let interfaces = vec![InterfaceInfo {
+            name: "en0".into(), mac: String::new(),
+            ipv4: vec!["10.0.0.5".parse().unwrap()], ipv6: vec![],
+            gateway: "10.0.0.1".into(), subnet: "255.255.255.0".into(),
+            is_up: true, kind: InterfaceKind::Wifi, dns: vec![],
+        }];
+        let hosts = vec![
+            HostInfo {
+                mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
+                addresses: vec!["10.0.0.10".parse().unwrap()],
+                hostname: None, os_hint: None, services: vec![], fingerprints: vec![],
+                interface: "en0".into(), network_id: String::new(),
+                first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+            },
+            HostInfo {
+                mac: "00:11:22:33:44:55".into(), vendor: String::new(),
+                addresses: vec!["10.0.0.20".parse().unwrap()],
+                hostname: None, os_hint: None, services: vec![], fingerprints: vec![],
+                interface: "en0".into(), network_id: String::new(),
+                first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+            },
+        ];
+        let topo = build_topology(&hosts, &interfaces);
+        assert_eq!(topo.subnets.len(), 1);
+        assert_eq!(topo.subnets[0].host_count, 2);
+        assert_eq!(topo.total_hosts, 2);
+    }
+
+    #[test]
+    fn build_topology_down_interface_excluded() {
+        use crate::model::{InterfaceKind, InterfaceInfo};
+        let interfaces = vec![InterfaceInfo {
+            name: "en0".into(), mac: String::new(),
+            ipv4: vec!["10.0.0.5".parse().unwrap()], ipv6: vec![],
+            gateway: "10.0.0.1".into(), subnet: "255.255.255.0".into(),
+            is_up: false, kind: InterfaceKind::Wifi, dns: vec![],
+        }];
+        let topo = build_topology(&[], &interfaces);
+        assert!(topo.subnets.is_empty(), "down interface should not create subnet");
+    }
+
+    #[test]
+    fn build_topology_empty() {
+        let topo = build_topology(&[], &[]);
+        assert!(topo.subnets.is_empty());
+        assert!(topo.gateway_to_subnets.is_empty());
+        assert_eq!(topo.total_hosts, 0);
+    }
+
+    #[test]
     fn format_topology_with_subnet() {
         let topo = Topology {
             subnets: vec![Subnet {
