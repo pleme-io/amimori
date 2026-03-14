@@ -143,6 +143,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         tracing::info!("TLS certificate collector enabled");
     }
 
+    // mDNS discovery — passive, listens for Bonjour/Avahi announcements.
+    // Safety level 0 (passive). Always enabled.
+    actors.push((
+        Box::new(collector::mdns::MdnsCollector::new(&config, Arc::clone(&engine))),
+        ActorConfig::interval_only(),
+    ));
+    tracing::info!("mDNS discovery enabled");
+
     if actors.is_empty() {
         anyhow::bail!(
             "no collector actors could be initialized — check config and tool availability"

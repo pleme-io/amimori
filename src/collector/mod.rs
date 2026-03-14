@@ -1,6 +1,7 @@
 pub mod arp;
 pub mod banner;
 pub mod interface;
+pub mod mdns;
 pub mod scanner;
 pub mod tls;
 #[cfg(target_os = "macos")]
