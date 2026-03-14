@@ -6,17 +6,38 @@ Persistent macOS/Linux service that continuously profiles all attached networks
 
 ## Architecture
 
+See [docs/architecture.md](docs/architecture.md) for detailed ADRs.
+See [docs/data-model.md](docs/data-model.md) for entity relationships and host lifecycle.
+
 ```
-Collectors (configurable intervals)   State Engine             Servers
-┌──────────────────────────────┐     ┌──────────────────┐    ┌──────────┐
-│ ArpCollector     (5s)        │────▶│ DashMap state     │◀──▶│ gRPC     │
-│ InterfaceCollector (5s)      │────▶│ Delta ring buffer │    │ (config) │
-│ WifiCollector    (15s, macOS)│────▶│ SQLite (SeaORM)   │    ├──────────┤
-│ NmapCollector    (60s, opt)  │────▶│ OUI vendor lookup │    │ MCP      │
-└──────────────────────────────┘     │ Filter engine     │    │ (stdio)  │
-  ↑ auto-disable on max_failures    │ Stale host pruner │    └──────────┘
-  ↑ configurable per-collector       └──────────────────┘
+Collectors (per-actor scheduling)    State Engine                 Servers
+┌──────────────────────────────┐    ┌────────────────────────┐   ┌──────────┐
+│ ArpCollector     (5s, react) │───▶│ NetworkState (DashMap)  │◀─▶│ gRPC     │
+│ InterfaceCollector (5s)      │───▶│ insert_host() gate      │   │ GetChanges│
+│ WifiCollector    (15s, macOS)│───▶│ Progressive enrichment  │   │ Subscribe│
+│ NmapCollector    (60s, react)│───▶│ Service change detection│   ├──────────┤
+└──────────────────────────────┘    │ Event timeline (3-tier) │   │ MCP      │
+  ↑ reactive triggers (event bus)   │ SQLite (SeaORM)         │   │ (stdio)  │
+  ↑ auto-disable on max_failures    │ OUI vendor lookup       │   └──────────┘
+  ↑ configurable per-collector      │ Filter engine           │
+                                    │ Stale host/event pruner │
+                                    └────────────────────────┘
 ```
+
+### Three-Tier Event System (ADR-001)
+
+1. **Durable** — `events` table in SQLite (append-only, survives restarts)
+2. **Fast** — In-memory ring buffer (bounded, serves GetChanges RPC)
+3. **Real-time** — broadcast channel (streams to gRPC Subscribe)
+
+### Key Invariants
+
+- **MAC gate**: `NetworkState::insert_host()` rejects broadcast, multicast, zero,
+  and self MACs. All host insertions go through this single gate. (ADR-002)
+- **Progressive enrichment**: hostname/OS only overwritten with richer data.
+  Services tracked with add/remove detection. (ADR-004)
+- **normalize_mac**: returns `Option<String>`, validates AND normalizes. Every
+  MAC in the system passed through it. (ADR-005)
 
 ## Modes
 
@@ -33,7 +54,7 @@ Nested YAML config via shikumi. Every aspect is configurable:
 
 ```yaml
 # ~/.config/amimori/amimori.yaml
-interfaces: [en0, en4]  # empty = auto-detect all non-loopback
+interfaces: [en0]  # empty = auto-detect all non-loopback
 
 grpc:
   address: "127.0.0.1"
@@ -44,6 +65,7 @@ collectors:
     enable: true
     interval: 5          # seconds
     max_failures: 10     # auto-disable after N consecutive failures
+    reactive: true       # re-run on network changes
   interface:
     enable: true
     interval: 5
@@ -57,9 +79,14 @@ collectors:
     interval: 60
     bin: nmap
     timeout: 120         # kill nmap after this many seconds
-    service_detection: false
+    service_detection: true   # -sV (version probes)
+    os_detection: true        # -O --osscan-guess (requires root)
+    top_ports: 200            # --top-ports N
+    version_intensity: 7      # 0-9 probe depth
     subnets: []          # empty = auto-derive from active interfaces
     max_failures: 3
+    reactive: true       # re-run on network changes
+    reactive_cooldown: 5
 
 storage:
   db_path: ~/.local/share/amimori/state.db
@@ -81,22 +108,27 @@ logging:
 
 Environment variables override config: `AMIMORI_GRPC__PORT=50052`, `AMIMORI_CONFIG=/path`.
 
-## Key Design
+## Trait Boundaries (ADR-007)
 
-- **Per-collector lifecycle**: Each collector tracks consecutive failures and auto-disables after `max_failures`. Recovery resets the counter.
-- **Filter engine**: MAC/IP/interface exclusion + vendor inclusion applied at the state engine level, before persistence.
-- **Stale host pruning**: Background task removes hosts not seen within `host_ttl`.
-- **Subnet auto-discovery**: nmap derives CIDRs from active interface addresses instead of hardcoded subnets.
-- **nmap timeout**: `tokio::time::timeout` kills hung scans.
-- **nmap capability detection**: Checks `nmap --version` at startup; disables scanner if not found.
-- **Robust XML parsing**: `quick-xml` for nmap output instead of hand-rolled string ops.
-- **Structured logging**: JSON format option for log aggregation.
+Every external dependency is behind a trait for testability:
+
+| Trait | Real Impl | Mock | Used By |
+|-------|-----------|------|---------|
+| `StorageBackend` | `Database` (SeaORM/SQLite) | `InMemoryStorage` | StateEngine |
+| `VendorLookup` | `OuiVendorLookup` (mac_oui) | `MockVendorLookup` | StateEngine |
+| `CommandRunner` | `SystemCommandRunner` | `MockCommandRunner` | (TODO: collectors) |
+
+**Gaps to close:**
+- Collectors call `tokio::process::Command` directly — should use `CommandRunner`
+- No trait for time source — prevents deterministic pruning tests
+- WiFi collector uses CoreWLAN directly — platform-specific, no trait
+- `platform::system_bin()` is a function, not a trait — works for now
 
 ## Dependencies
 
 | Crate | Purpose |
 |-------|---------|
-| shikumi | Config discovery, hot-reload, env override |
+| shikumi | Config discovery, env override |
 | kaname/rmcp | MCP server framework |
 | sea-orm | SQLite ORM with migrations |
 | tonic/prost | gRPC server + proto codegen |
@@ -113,11 +145,22 @@ Environment variables override config: `AMIMORI_GRPC__PORT=50052`, `AMIMORI_CONF
 |------|-------------|
 | `network_snapshot` | Full snapshot — interfaces, hosts, WiFi |
 | `network_hosts` | List hosts with interface/vendor/port filters |
-| `network_changes` | Recent delta events |
+| `network_changes` | Recent delta events from GetChanges RPC |
 | `network_host_detail` | Detailed host info by MAC or IP |
 | `wifi_networks` | Visible WiFi sorted by signal, with security/RSSI filter |
 | `network_interfaces` | All interfaces with IP, gateway, DNS, status |
 | `network_stats` | Daemon health and statistics |
+
+## gRPC API
+
+| RPC | Type | Description |
+|-----|------|-------------|
+| `GetSnapshot` | Unary | Full network state with optional interface filter |
+| `GetChanges` | Unary | Buffered delta events since a sequence number |
+| `Subscribe` | Server stream | Live delta events (replay + stream) |
+| `GetHost` | Unary | Host detail by MAC or IP |
+| `ListInterfaces` | Unary | All monitored interfaces |
+| `ListWifiNetworks` | Unary | All visible WiFi networks |
 
 ## File Structure
 
@@ -126,18 +169,56 @@ src/
 ├── main.rs              # clap: daemon | mcp | scan | status
 ├── config.rs            # nested config with validation
 ├── daemon.rs            # orchestrate collectors + gRPC + pruner
-├── state.rs             # DashMap + delta engine + filters + pruning
-├── model.rs             # domain types, MAC utils, serde
+├── state.rs             # DashMap + delta engine + filters + pruning + emit
+├── model.rs             # domain types, MAC gate, serde
+├── platform.rs          # system binary resolution (ADR-003)
+├── error.rs             # error types
+├── event_bus.rs         # trigger events for reactive scheduling
+├── traits.rs            # trait boundaries + mocks (ADR-007)
 ├── db/
-│   ├── mod.rs           # SeaORM CRUD layer
-│   ├── entity/          # host, service, interface, wifi entities
-│   └── migration/       # schema migrations
+│   ├── mod.rs           # SeaORM CRUD + event timeline
+│   ├── entity/          # host, service, interface, wifi, event entities
+│   └── migration/       # 3 migrations: tables, network_id, event_log
 ├── collector/
-│   ├── mod.rs           # trait + scheduler with failure tracking
-│   ├── arp.rs           # parse arp -a
+│   ├── mod.rs           # Collector trait + actor scheduler (ADR-006)
+│   ├── arp.rs           # parse arp -a (via platform::system_bin)
 │   ├── interface.rs     # network-interface + netstat + scutil
 │   ├── wifi.rs          # CoreWLAN (macOS, #[cfg])
-│   └── scanner.rs       # nmap with quick-xml, timeout, auto-subnets
-├── grpc.rs              # tonic server, configurable bind
-└── mcp.rs               # 7 MCP tools via rmcp
+│   └── scanner.rs       # nmap with deep fingerprinting (ADR-008)
+├── grpc.rs              # tonic server + proto conversions
+├── mcp.rs               # 7 MCP tools via rmcp
+docs/
+├── architecture.md      # ADR decisions
+└── data-model.md        # entity relationships, host lifecycle, event types
+proto/
+└── amimori.proto        # gRPC service definition
+module/
+├── default.nix          # HM module (MCP server entry)
+├── darwin/default.nix   # nix-darwin module (launchd daemon)
+└── nixos/default.nix    # NixOS module (systemd service)
 ```
+
+## Building
+
+```bash
+# Development (needs protoc)
+PROTOC=$(nix build nixpkgs#protobuf --print-out-paths --no-link)/bin/protoc cargo build
+
+# Tests (210+)
+PROTOC=... cargo test
+
+# Nix build (production, cross-compiled)
+nix build
+```
+
+## Platform Notes
+
+- **macOS WiFi SSID**: CoreWLAN requires Location Services entitlement to return
+  SSIDs. The daemon binary from Nix doesn't have Apple entitlements, so SSIDs
+  appear empty. Connected network info may still work for root daemons.
+- **macOS system binaries**: `arp`, `netstat`, `scutil` live at `/usr/sbin/`.
+  The `platform::system_bin()` layer resolves these. launchd daemons have
+  minimal PATH (only nix store paths).
+- **nmap -O**: requires root. The daemon runs as root via launchd/systemd.
+  If run as non-root user, `-O` causes nmap to exit with error. The scanner
+  handles this gracefully.
