@@ -157,6 +157,27 @@ mod tests {
     }
 
     #[test]
+    fn ip_in_cidr_0() {
+        // /0 matches everything
+        assert!(ip_in_cidr("192.168.1.1".parse().unwrap(), "0.0.0.0/0"));
+        assert!(ip_in_cidr("10.0.0.1".parse().unwrap(), "0.0.0.0/0"));
+    }
+
+    #[test]
+    fn ip_in_cidr_31() {
+        // /31 point-to-point: only 2 IPs
+        assert!(ip_in_cidr("10.0.0.0".parse().unwrap(), "10.0.0.0/31"));
+        assert!(ip_in_cidr("10.0.0.1".parse().unwrap(), "10.0.0.0/31"));
+        assert!(!ip_in_cidr("10.0.0.2".parse().unwrap(), "10.0.0.0/31"));
+    }
+
+    #[test]
+    fn ip_in_cidr_invalid() {
+        assert!(!ip_in_cidr("10.0.0.1".parse().unwrap(), "not-a-cidr"));
+        assert!(!ip_in_cidr("10.0.0.1".parse().unwrap(), "10.0.0.0/33"));
+    }
+
+    #[test]
     fn format_topology_with_subnet() {
         let topo = Topology {
             subnets: vec![Subnet {

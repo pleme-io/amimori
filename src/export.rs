@@ -98,4 +98,76 @@ mod tests {
     fn escape_csv_clean() {
         assert_eq!(escape_csv("hello"), "hello");
     }
+
+    #[test]
+    fn escape_csv_quotes() {
+        assert_eq!(escape_csv(r#"say "hello""#), r#""say ""hello""""#);
+    }
+
+    #[test]
+    fn escape_csv_newlines() {
+        assert_eq!(escape_csv("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn csv_with_services() {
+        use crate::model::ServiceInfo;
+        let mut host = make_host();
+        host.services = vec![
+            ServiceInfo {
+                port: 22, protocol: "tcp".into(), name: "ssh".into(),
+                version: "OpenSSH 9".into(), state: "open".into(), banner: String::new(),
+            },
+            ServiceInfo {
+                port: 80, protocol: "tcp".into(), name: "http".into(),
+                version: String::new(), state: "open".into(), banner: String::new(),
+            },
+        ];
+        let csv = to_csv(&[host]);
+        assert!(csv.contains("22/tcp;80/tcp"));
+    }
+
+    #[test]
+    fn csv_with_vendor_containing_comma() {
+        let mut host = make_host();
+        host.vendor = "Hon Hai Precision Ind. Co, Ltd".into();
+        let csv = to_csv(&[host]);
+        // Vendor with comma should be quoted
+        assert!(csv.contains("\"Hon Hai Precision Ind. Co, Ltd\""));
+    }
+
+    #[test]
+    fn json_with_fingerprints() {
+        use crate::model::{Fingerprint, FingerprintSource};
+        let mut host = make_host();
+        host.fingerprints = vec![Fingerprint {
+            source: FingerprintSource::Nmap,
+            category: "os".into(),
+            key: "name".into(),
+            value: "macOS".into(),
+            confidence: 0.7,
+            observed_at: Utc::now(),
+        }];
+        let json = to_json(&[host]);
+        assert!(json.contains("fingerprints"));
+        assert!(json.contains("macOS"));
+        assert!(json.contains("0.7"));
+    }
+
+    #[test]
+    fn json_empty_array() {
+        let json = to_json(&[]);
+        assert_eq!(json, "[]");
+    }
+
+    #[test]
+    fn csv_outlier_score_present() {
+        let csv = to_csv(&[make_host()]);
+        // Row should have the outlier score field (column 9, 0-indexed 8)
+        let row = csv.lines().nth(1).unwrap();
+        let fields: Vec<&str> = row.split(',').collect();
+        // outlier_score is field index 8 — should parse as float
+        let score: f32 = fields[8].parse().expect("outlier score should be a float");
+        assert!(score >= 0.0 && score <= 5.0);
+    }
 }

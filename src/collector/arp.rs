@@ -1,23 +1,27 @@
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::collector::{Collector, CollectorOutput};
 use crate::config::Config;
 use crate::model::{ArpEntry, normalize_mac};
+use crate::traits::CommandRunner;
 
 /// Parses `arp -a` output for each monitored interface. No root required.
 pub struct ArpCollector {
     interfaces: Vec<String>,
     interval: Duration,
     max_failures: u32,
+    cmd: Arc<dyn CommandRunner>,
 }
 
 impl ArpCollector {
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &Config, cmd: Arc<dyn CommandRunner>) -> Self {
         Self {
             interfaces: config.interfaces.clone(),
             interval: Duration::from_secs(config.collectors.arp.interval),
             max_failures: config.collectors.arp.max_failures,
+            cmd,
         }
     }
 }
@@ -37,49 +41,38 @@ impl Collector for ArpCollector {
     }
 
     async fn collect(&self) -> anyhow::Result<CollectorOutput> {
-        let output = tokio::process::Command::new(crate::platform::system_bin("arp"))
-            .arg("-a")
-            .output()
+        let output = self
+            .cmd
+            .run(crate::platform::system_bin("arp"), &["-a"])
             .await?;
 
-        if !output.status.success() {
-            anyhow::bail!(
-                "arp -a exited with {}",
-                output.status.code().unwrap_or(-1)
-            );
+        if !output.success {
+            anyhow::bail!("arp -a failed: {}", output.stderr);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let entries = parse_arp_output(&stdout, &self.interfaces);
+        let entries = parse_arp_output(&output.stdout, &self.interfaces);
         tracing::debug!(count = entries.len(), "arp scan complete");
         Ok(CollectorOutput::Arp(entries))
     }
 }
 
-/// Parse macOS/Linux `arp -a` output. Pure function — no IO.
-///
-/// Format: `? (10.0.0.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]`
+// ── Pure parsing (testable without system commands) ──────────────────────
+
 pub fn parse_arp_output(output: &str, monitored: &[String]) -> Vec<ArpEntry> {
     let mut entries = Vec::new();
 
     for line in output.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        // Extract IP from parentheses
         let Some(ip_start) = line.find('(') else {
             continue;
         };
         let Some(ip_end) = line.find(')') else {
             continue;
         };
-        let Ok(ip) = line[ip_start + 1..ip_end].parse::<IpAddr>() else {
+        let ip_str = &line[ip_start + 1..ip_end];
+        let Ok(ip) = ip_str.parse::<IpAddr>() else {
             continue;
         };
 
-        // Extract MAC after " at "
         let after_paren = &line[ip_end + 1..];
         let Some(at_pos) = after_paren.find(" at ") else {
             continue;
@@ -202,7 +195,7 @@ mod tests {
                        ? (10.0.0.2) at 10:22:33:44:55:66 on en4 ifscope [ethernet]";
         let entries = parse_arp_output(output, &["en4".to_string()]);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].interface, "en4");
+        assert_eq!(entries[0].ip.to_string(), "10.0.0.2");
     }
 
     #[test]
@@ -221,7 +214,6 @@ mod tests {
 
     #[test]
     fn rejects_multicast_addresses() {
-        // Multicast MACs (01:00:5e:* = IPv4 multicast) are filtered by normalize_mac
         let output = "? (224.0.0.251) at 01:00:5e:00:00:fb on en0 ifscope permanent [ethernet]";
         let entries = parse_arp_output(output, &[]);
         assert!(entries.is_empty());
@@ -232,5 +224,59 @@ mod tests {
         let output = "? (10.20.223.255) at ff:ff:ff:ff:ff:ff on en0 ifscope [ethernet]";
         let entries = parse_arp_output(output, &[]);
         assert!(entries.is_empty());
+    }
+
+    // ── CommandRunner-based integration test ────────────────────────────
+
+    #[tokio::test]
+    async fn arp_collector_with_mock_runner() {
+        use crate::traits::mocks::MockCommandRunner;
+
+        let arp_output = "? (10.0.0.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n\
+                          myhost.local (10.0.0.2) at 10:22:33:44:55:66 on en0 ifscope [ethernet]";
+
+        let runner = Arc::new(MockCommandRunner::new());
+        runner.set_response(
+            crate::platform::system_bin("arp"),
+            crate::traits::CommandOutput {
+                success: true,
+                stdout: arp_output.to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let mut config = crate::config::Config::default();
+        config.interfaces = vec!["en0".to_string()];
+
+        let collector = ArpCollector::new(&config, runner);
+        let result = collector.collect().await.unwrap();
+
+        match result {
+            CollectorOutput::Arp(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].mac, "aa:bb:cc:dd:ee:ff");
+                assert_eq!(entries[1].hostname.as_deref(), Some("myhost.local"));
+            }
+            _ => panic!("expected Arp output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn arp_collector_handles_command_failure() {
+        use crate::traits::mocks::MockCommandRunner;
+
+        let runner = Arc::new(MockCommandRunner::new());
+        runner.set_response(
+            crate::platform::system_bin("arp"),
+            crate::traits::CommandOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "arp: command not found".to_string(),
+            },
+        );
+
+        let collector = ArpCollector::new(&crate::config::Config::default(), runner);
+        let result = collector.collect().await;
+        assert!(result.is_err());
     }
 }

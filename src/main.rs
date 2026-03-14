@@ -164,7 +164,9 @@ async fn run_scan(config: &config::Config) -> anyhow::Result<()> {
         _ => Vec::new(),
     };
 
-    let arp_collector = collector::arp::ArpCollector::new(config);
+    let cmd_runner: std::sync::Arc<dyn traits::CommandRunner> =
+        std::sync::Arc::new(traits::SystemCommandRunner);
+    let arp_collector = collector::arp::ArpCollector::new(config, cmd_runner);
     let arp_entries = match arp_collector.collect().await? {
         collector::CollectorOutput::Arp(e) => e,
         _ => Vec::new(),

@@ -41,6 +41,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     let mut actors: Vec<(Box<dyn Collector>, ActorConfig)> = Vec::new();
 
+    // Shared command runner for collectors that shell out to system commands.
+    let cmd_runner: Arc<dyn crate::traits::CommandRunner> =
+        Arc::new(crate::traits::SystemCommandRunner);
+
     // Interface watcher — the root event source (interval-only, no reactive triggers)
     if config.collectors.interface.enable {
         actors.push((
@@ -51,12 +55,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     // ARP collector — reactive on interface/network changes
     if config.collectors.arp.enable {
-        match tokio::process::Command::new(crate::platform::system_bin("arp"))
-            .arg("-a")
-            .output()
+        match cmd_runner
+            .run(crate::platform::system_bin("arp"), &["-a"])
             .await
         {
-            Ok(output) if output.status.success() => {
+            Ok(output) if output.success => {
                 let actor_cfg = if config.collectors.arp.reactive {
                     ActorConfig::reactive(
                         vec![TriggerKind::InterfaceChanged, TriggerKind::NetworkChanged],
@@ -65,7 +68,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 } else {
                     ActorConfig::interval_only()
                 };
-                actors.push((Box::new(ArpCollector::new(&config)), actor_cfg));
+                actors.push((
+                    Box::new(ArpCollector::new(&config, Arc::clone(&cmd_runner))),
+                    actor_cfg,
+                ));
             }
             _ => {
                 tracing::warn!("arp command not available, collector disabled");
@@ -173,7 +179,11 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     // Reverse DNS — PTR lookups for all discovered IPs.
     // Safety level 2 (discovery, DNS queries).
     actors.push((
-        Box::new(collector::dns::DnsCollector::new(&config, Arc::clone(&engine))),
+        Box::new(collector::dns::DnsCollector::new(
+            &config,
+            Arc::clone(&engine),
+            Arc::clone(&cmd_runner),
+        )),
         ActorConfig::interval_only(),
     ));
     tracing::info!("reverse DNS enabled");

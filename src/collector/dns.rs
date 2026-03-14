@@ -1,8 +1,8 @@
 //! Reverse DNS collector — PTR lookups for all discovered IPs.
 //!
 //! For every IP in the host table without a hostname, queries the
-//! PTR record. Often reveals descriptive names like
-//! `printer-3rd-floor.company.com` or `ap-lobby.company.com`.
+//! PTR record via the system `host` command. Often reveals descriptive
+//! names like `printer-3rd-floor.company.com`.
 //!
 //! Safety level: 2 (Discovery) — sends DNS queries to the configured resolver.
 
@@ -16,19 +16,22 @@ use crate::collector::banner::BannerResult;
 use crate::config::Config;
 use crate::model::{Fingerprint, FingerprintSource};
 use crate::state::StateEngine;
+use crate::traits::CommandRunner;
 
 pub struct DnsCollector {
     interval: Duration,
     max_failures: u32,
     engine: Arc<StateEngine>,
+    cmd: Arc<dyn CommandRunner>,
 }
 
 impl DnsCollector {
-    pub fn new(_config: &Config, engine: Arc<StateEngine>) -> Self {
+    pub fn new(_config: &Config, engine: Arc<StateEngine>, cmd: Arc<dyn CommandRunner>) -> Self {
         Self {
             interval: Duration::from_secs(120),
             max_failures: 5,
             engine,
+            cmd,
         }
     }
 }
@@ -51,7 +54,6 @@ impl Collector for DnsCollector {
         let now = Utc::now();
         let mut results = Vec::new();
 
-        // Collect IPs that need reverse DNS
         let targets: Vec<(String, std::net::IpAddr)> = self
             .engine
             .state
@@ -71,18 +73,15 @@ impl Collector for DnsCollector {
             .collect();
 
         for (mac, ip) in targets {
-            // Use system DNS via dig/host command for reverse lookup
             let ip_str = ip.to_string();
-            let output = tokio::process::Command::new(crate::platform::system_bin("host"))
-                .arg(&ip_str)
-                .output()
+            let output = self
+                .cmd
+                .run(crate::platform::system_bin("host"), &[&ip_str])
                 .await;
 
             if let Ok(out) = output {
-                if out.status.success() {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    // Parse "X.X.X.X.in-addr.arpa domain name pointer hostname."
-                    if let Some(hostname) = parse_host_output(&stdout) {
+                if out.success {
+                    if let Some(hostname) = parse_host_output(&out.stdout) {
                         results.push(BannerResult {
                             mac,
                             ip: ip_str,
@@ -109,8 +108,7 @@ impl Collector for DnsCollector {
 }
 
 /// Parse `host` command output to extract PTR hostname.
-/// Input: "1.0.168.192.in-addr.arpa domain name pointer myhost.local."
-fn parse_host_output(output: &str) -> Option<String> {
+pub fn parse_host_output(output: &str) -> Option<String> {
     for line in output.lines() {
         if let Some(idx) = line.find("domain name pointer ") {
             let hostname = line[idx + 20..].trim().trim_end_matches('.');
@@ -142,5 +140,16 @@ mod tests {
     fn parse_host_output_multiple_lines() {
         let output = "Using domain server:\nName: 127.0.0.1\n\n1.0.0.10.in-addr.arpa domain name pointer router.lan.\n";
         assert_eq!(parse_host_output(output).as_deref(), Some("router.lan"));
+    }
+
+    #[test]
+    fn parse_host_output_trailing_dot_stripped() {
+        let output = "1.0.0.10.in-addr.arpa domain name pointer myhost.example.com.\n";
+        assert_eq!(parse_host_output(output).as_deref(), Some("myhost.example.com"));
+    }
+
+    #[test]
+    fn parse_host_output_empty() {
+        assert!(parse_host_output("").is_none());
     }
 }
