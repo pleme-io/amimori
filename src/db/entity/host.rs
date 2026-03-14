@@ -14,6 +14,9 @@ pub struct Model {
     pub network_id: String,
     pub first_seen: ChronoDateTimeUtc,
     pub last_seen: ChronoDateTimeUtc,
+    /// Full HostInfo serialized as JSON — the SSOT document.
+    /// When present, this is used instead of assembling from relational columns.
+    pub document_json: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

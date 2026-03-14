@@ -118,6 +118,9 @@ impl Database {
             .map(ToString::to_string)
             .collect();
 
+        // Serialize the full HostInfo as the SSOT document
+        let document = serde_json::to_string(host)?;
+
         let existing = entity::host::Entity::find_by_id(&host.mac)
             .one(&self.conn)
             .await?;
@@ -132,8 +135,9 @@ impl Database {
                 os_hint: Set(host.os_hint.clone()),
                 interface: Set(host.interface.clone()),
                 network_id: Set(host.network_id.clone()),
-                first_seen: sea_orm::ActiveValue::NotSet, // never overwrite creation time
+                first_seen: sea_orm::ActiveValue::NotSet,
                 last_seen: Set(host.last_seen),
+                document_json: Set(Some(document)),
             };
             active.update(&self.conn).await?;
         } else {
@@ -148,6 +152,7 @@ impl Database {
                 network_id: Set(host.network_id.clone()),
                 first_seen: Set(host.first_seen),
                 last_seen: Set(host.last_seen),
+                document_json: Set(Some(document)),
             };
             active.insert(&self.conn).await?;
         }
@@ -394,6 +399,16 @@ fn row_to_host_info(
     row: &entity::host::Model,
     services: &[entity::service::Model],
 ) -> HostInfo {
+    // Prefer the SSOT document when available — it includes fingerprints,
+    // banners, and all enrichment data that relational columns don't capture.
+    if let Some(ref doc) = row.document_json {
+        if let Ok(host) = serde_json::from_str::<HostInfo>(doc) {
+            return host;
+        }
+        tracing::warn!(mac = %row.mac, "corrupt document_json, falling back to columns");
+    }
+
+    // Fallback: assemble from relational columns (pre-migration data)
     let ipv4: Vec<String> = serde_json::from_str(&row.ipv4_json).unwrap_or_else(|e| {
         tracing::warn!(mac = %row.mac, error = %e, "corrupt ipv4_json in database");
         Vec::new()
@@ -417,7 +432,7 @@ fn row_to_host_info(
             name: s.name.clone(),
             version: s.version.clone(),
             state: s.state.clone(),
-            banner: String::new(), // banners not persisted in current schema
+            banner: String::new(),
         })
         .collect();
 
@@ -428,7 +443,7 @@ fn row_to_host_info(
         hostname: row.hostname.clone(),
         os_hint: row.os_hint.clone(),
         services: svcs,
-        fingerprints: Vec::new(), // fingerprints rebuilt from live collectors
+        fingerprints: Vec::new(),
         interface: row.interface.clone(),
         network_id: row.network_id.clone(),
         first_seen: row.first_seen.with_timezone(&Utc),
@@ -543,6 +558,7 @@ mod tests {
             network_id: "10.0.0.1|255.255.255.0".into(),
             first_seen: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
             last_seen: Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
+            document_json: None, // test uses relational fallback
         }
     }
 
@@ -649,6 +665,77 @@ mod tests {
     }
 
     // ── row_to_wifi_info ───────────────────────────────────────────────
+
+    #[test]
+    #[test]
+    fn row_to_host_info_prefers_document() {
+        use crate::model::{Fingerprint, FingerprintSource};
+
+        // Create a HostInfo with fingerprints
+        let original = HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: "Apple".into(),
+            addresses: vec!["10.0.0.1".parse().unwrap()],
+            hostname: Some("macbook.local".into()),
+            os_hint: Some("macOS".into()),
+            services: vec![],
+            fingerprints: vec![Fingerprint {
+                source: FingerprintSource::Mdns,
+                category: "hw".into(),
+                key: "model".into(),
+                value: "MacBook Pro".into(),
+                confidence: 0.95,
+                observed_at: Utc::now(),
+            }],
+            interface: "en0".into(),
+            network_id: "10.0.0.1|255.255.255.0".into(),
+            first_seen: Utc::now(),
+            last_seen: Utc::now(),
+        };
+
+        // Serialize to document_json
+        let doc = serde_json::to_string(&original).unwrap();
+
+        let row = entity::host::Model {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: "Apple".into(),
+            ipv4_json: r#"["10.0.0.1"]"#.into(),
+            ipv6_json: "[]".into(),
+            hostname: Some("macbook.local".into()),
+            os_hint: Some("macOS".into()),
+            interface: "en0".into(),
+            network_id: "10.0.0.1|255.255.255.0".into(),
+            first_seen: Utc::now(),
+            last_seen: Utc::now(),
+            document_json: Some(doc),
+        };
+
+        let restored = row_to_host_info(&row, &[]);
+        // Should use document, preserving fingerprints
+        assert_eq!(restored.fingerprints.len(), 1);
+        assert_eq!(restored.fingerprints[0].value, "MacBook Pro");
+        assert_eq!(restored.hostname.as_deref(), Some("macbook.local"));
+        assert_eq!(restored.os_hint.as_deref(), Some("macOS"));
+    }
+
+    #[test]
+    fn row_to_host_info_falls_back_without_document() {
+        let row = make_host_model(r#"["10.0.0.1"]"#, r#"["fe80::1"]"#);
+        // document_json is None — should use relational columns
+        let host = row_to_host_info(&row, &[]);
+        assert_eq!(host.mac, "aa:bb:cc:dd:ee:ff");
+        assert!(host.fingerprints.is_empty()); // no fingerprints from columns
+    }
+
+    #[test]
+    fn row_to_host_info_corrupt_document_falls_back() {
+        let mut row = make_host_model(r#"["10.0.0.1"]"#, "[]");
+        row.document_json = Some("not valid json".into());
+        let host = row_to_host_info(&row, &[]);
+        // Should fall back to relational columns
+        assert_eq!(host.mac, "aa:bb:cc:dd:ee:ff");
+        assert!(host.fingerprints.is_empty());
+    }
 
     #[test]
     fn row_to_wifi_info_basic() {
