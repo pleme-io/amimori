@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, FilterConfig};
@@ -21,7 +21,10 @@ use crate::traits::{OuiVendorLookup, StorageBackend, VendorLookup};
 pub struct StateEngine {
     pub state: Arc<NetworkState>,
     event_log: Arc<RwLock<VecDeque<DeltaEvent>>>,
-    subscribers: Arc<RwLock<Vec<mpsc::Sender<DeltaEvent>>>>,
+    /// Non-blocking broadcast for live event subscribers (gRPC Subscribe).
+    /// Unlike Vec<mpsc::Sender>, a single slow/hung client cannot block
+    /// the state engine from emitting events to all other clients.
+    event_broadcast: broadcast::Sender<DeltaEvent>,
     db: Arc<dyn StorageBackend>,
     vendor: Arc<dyn VendorLookup>,
     trigger_bus: Option<broadcast::Sender<TriggerEvent>>,
@@ -63,12 +66,14 @@ impl StateEngine {
             "state restored from database"
         );
 
+        let (event_broadcast, _) = broadcast::channel(config.storage.event_buffer_size);
+
         Ok(Self {
             state,
             event_log: Arc::new(RwLock::new(VecDeque::with_capacity(
                 config.storage.event_buffer_size,
             ))),
-            subscribers: Arc::new(RwLock::new(Vec::new())),
+            event_broadcast,
             db: Arc::new(db),
             vendor: Arc::new(vendor),
             trigger_bus,
@@ -86,10 +91,12 @@ impl StateEngine {
         filters: FilterConfig,
         buffer_size: usize,
     ) -> Self {
+        let (event_broadcast, _) = broadcast::channel(buffer_size);
+
         Self {
             state: Arc::new(NetworkState::new()),
             event_log: Arc::new(RwLock::new(VecDeque::with_capacity(buffer_size))),
-            subscribers: Arc::new(RwLock::new(Vec::new())),
+            event_broadcast,
             db,
             vendor,
             trigger_bus: None,
@@ -98,10 +105,12 @@ impl StateEngine {
         }
     }
 
-    pub async fn subscribe(&self) -> mpsc::Receiver<DeltaEvent> {
-        let (tx, rx) = mpsc::channel(256);
-        self.subscribers.write().await.push(tx);
-        rx
+    /// Subscribe to live delta events. Returns a broadcast receiver.
+    /// Non-blocking: a slow subscriber doesn't stall the state engine.
+    /// Lagged subscribers get `RecvError::Lagged(n)` and can catch up
+    /// via `events_since(last_seq)`.
+    pub fn subscribe(&self) -> broadcast::Receiver<DeltaEvent> {
+        self.event_broadcast.subscribe()
     }
 
     pub async fn events_since(&self, seq: u64) -> Vec<DeltaEvent> {
@@ -114,18 +123,9 @@ impl StateEngine {
             .collect()
     }
 
+    /// Look up a host by MAC or IP. IP lookup is O(1) via reverse index.
     pub fn get_host(&self, addr: &str) -> Option<HostInfo> {
-        if let Some(host) = self.state.hosts.get(addr) {
-            return Some(host.clone());
-        }
-        if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
-            for entry in self.state.hosts.iter() {
-                if entry.value().addresses.contains(&ip) {
-                    return Some(entry.value().clone());
-                }
-            }
-        }
-        None
+        self.state.get_host(addr)
     }
 
     /// Get the current network_id for an interface (gateway|subnet fingerprint).
@@ -161,6 +161,7 @@ impl StateEngine {
 
                 if !existing.addresses.contains(&entry.ip) {
                     existing.addresses.push(entry.ip);
+                    self.state.ip_to_mac.insert(entry.ip, mac.clone());
                     changed = true;
                 }
                 if entry.hostname.is_some() && existing.hostname != entry.hostname {
@@ -341,7 +342,12 @@ impl StateEngine {
             .collect();
 
         for mac in &removed {
-            self.state.hosts.remove(mac);
+            // Clean IP reverse index before removing host
+            if let Some((_, host)) = self.state.hosts.remove(mac) {
+                for addr in &host.addresses {
+                    self.state.ip_to_mac.remove(addr);
+                }
+            }
             self.emit(Change::HostRemoved { mac: mac.clone() }).await;
         }
 
@@ -452,6 +458,7 @@ impl StateEngine {
 
                     if !existing.addresses.contains(&nmap_host.ip) {
                         existing.addresses.push(nmap_host.ip);
+                        self.state.ip_to_mac.insert(nmap_host.ip, mac.clone());
                         changed = true;
                     }
                     // Progressive enrichment: accept richer data, never overwrite
@@ -564,7 +571,11 @@ impl StateEngine {
 
         let count = stale_macs.len();
         for mac in &stale_macs {
-            self.state.hosts.remove(mac);
+            if let Some((_, host)) = self.state.hosts.remove(mac) {
+                for addr in &host.addresses {
+                    self.state.ip_to_mac.remove(addr);
+                }
+            }
             self.emit(Change::HostRemoved { mac: mac.clone() }).await;
             self.db.remove_host(mac).await?;
         }
@@ -637,7 +648,7 @@ impl StateEngine {
             tracing::warn!(seq, error = %e, "failed to persist event to timeline");
         }
 
-        // In-memory ring buffer for gRPC streaming
+        // In-memory ring buffer (serves GetChanges RPC)
         {
             let mut log = self.event_log.write().await;
             if log.len() >= self.buffer_size {
@@ -646,14 +657,9 @@ impl StateEngine {
             log.push_back(event.clone());
         }
 
-        // Fan-out to live subscribers
-        {
-            let mut subs = self.subscribers.write().await;
-            subs.retain(|tx| !tx.is_closed());
-            for tx in subs.iter() {
-                let _ = tx.try_send(event.clone());
-            }
-        }
+        // Non-blocking broadcast to all live subscribers (gRPC Subscribe).
+        // Lagged receivers get RecvError::Lagged and can catch up via events_since().
+        let _ = self.event_broadcast.send(event);
     }
 }
 
@@ -821,7 +827,7 @@ mod tests {
     #[tokio::test]
     async fn arp_emits_host_added_event() {
         let engine = make_engine(FilterConfig::default());
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
 
         engine
             .apply_arp_results(&[arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.1", "en0")])
@@ -841,7 +847,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
         engine
             .apply_arp_results(&[arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.2", "en0")])
             .await
@@ -859,7 +865,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
         engine
             .apply_arp_results(&[arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.1", "en0")])
             .await
@@ -874,7 +880,7 @@ mod tests {
     #[tokio::test]
     async fn interface_first_insert_emits_changed() {
         let engine = make_engine(FilterConfig::default());
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
 
         engine
             .apply_interface_state(&[iface("en0", true)])
@@ -894,7 +900,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
         engine
             .apply_interface_state(&[iface("en0", true)])
             .await
@@ -911,7 +917,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
         engine
             .apply_interface_state(&[iface("en0", false)])
             .await
@@ -940,7 +946,7 @@ mod tests {
     #[tokio::test]
     async fn wifi_adds_new_network() {
         let engine = make_engine(FilterConfig::default());
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
 
         engine
             .apply_wifi_scan(&[wifi("MyNet", "aa:bb:cc:dd:ee:ff", -60)])
@@ -960,7 +966,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
         engine
             .apply_wifi_scan(&[wifi("MyNet", "aa:bb:cc:dd:ee:ff", -70)])
             .await
@@ -978,7 +984,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
         engine
             .apply_wifi_scan(&[wifi("MyNet", "aa:bb:cc:dd:ee:ff", -60)])
             .await
@@ -999,7 +1005,7 @@ mod tests {
             .unwrap();
         assert_eq!(engine.state.wifi_networks.len(), 2);
 
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
         // Second scan only has Net1 — Net2 vanished
         engine
             .apply_wifi_scan(&[wifi("Net1", "10:11:11:11:11:11", -60)])
@@ -1270,7 +1276,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut rx = engine.subscribe().await;
+        let mut rx = engine.subscribe();
 
         // Switch network
         let mut iface_b = iface("en0", true);

@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 pub struct NetworkState {
     pub interfaces: DashMap<String, InterfaceInfo>,
     pub hosts: DashMap<String, HostInfo>,
+    /// Reverse index: IP → MAC for O(1) host lookup by IP address.
+    /// Maintained automatically by `insert_host()`.
+    pub ip_to_mac: DashMap<IpAddr, String>,
     pub wifi_networks: DashMap<String, WifiInfo>,
     pub sequence: AtomicU64,
 }
@@ -26,19 +29,39 @@ impl NetworkState {
         Self {
             interfaces: DashMap::new(),
             hosts: DashMap::new(),
+            ip_to_mac: DashMap::new(),
             wifi_networks: DashMap::new(),
             sequence: AtomicU64::new(0),
         }
     }
 
     /// Insert a host, enforcing MAC validity and self-MAC filtering.
+    /// Maintains the IP→MAC reverse index automatically.
     /// Returns false if the host was rejected (non-host MAC or self MAC).
     pub fn insert_host(&self, mac: String, host: HostInfo) -> bool {
         if is_non_host_mac(&mac) || self.is_self_mac(&mac) {
             return false;
         }
+        for addr in &host.addresses {
+            self.ip_to_mac.insert(*addr, mac.clone());
+        }
         self.hosts.insert(mac, host);
         true
+    }
+
+    /// Look up a host by MAC or IP address. IP lookup is O(1) via reverse index.
+    pub fn get_host(&self, addr: &str) -> Option<HostInfo> {
+        // Direct MAC lookup
+        if let Some(host) = self.hosts.get(addr) {
+            return Some(host.clone());
+        }
+        // IP reverse index lookup
+        if let Ok(ip) = addr.parse::<IpAddr>() {
+            if let Some(mac) = self.ip_to_mac.get(&ip) {
+                return self.hosts.get(mac.value()).map(|h| h.clone());
+            }
+        }
+        None
     }
 
     /// Check if a MAC belongs to one of our monitored interfaces.

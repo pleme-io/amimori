@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use prost_types::Timestamp;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use tokio_util::sync::CancellationToken;
@@ -80,12 +80,22 @@ impl NetworkProfiler for ProfilerService {
             }
         }
 
-        // Stream live updates
-        let mut live_rx = self.engine.subscribe().await;
+        // Stream live updates via broadcast receiver.
+        // Lagged events are skipped (client can catch up via GetChanges).
+        let mut live_rx = self.engine.subscribe();
         tokio::spawn(async move {
-            while let Some(event) = live_rx.recv().await {
-                if tx.send(Ok(delta_to_proto(&event))).await.is_err() {
-                    break;
+            loop {
+                match live_rx.recv().await {
+                    Ok(event) => {
+                        if tx.send(Ok(delta_to_proto(&event))).await.is_err() {
+                            break; // client disconnected
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::debug!(skipped = n, "gRPC subscriber lagged");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
