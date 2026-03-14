@@ -2,6 +2,7 @@ mod collector;
 mod config;
 mod daemon;
 mod db;
+mod enrichment;
 mod error;
 mod event_bus;
 mod grpc;

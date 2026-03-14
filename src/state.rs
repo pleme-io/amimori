@@ -542,7 +542,11 @@ impl StateEngine {
                     })
                     .await;
                 }
-                if let Some(host) = updated {
+                if let Some(mut host) = updated {
+                    // Post-enrichment: derive CPE identifiers from services
+                    for cpe_fp in crate::enrichment::derive_cpe(&host) {
+                        host.merge_fingerprint(cpe_fp);
+                    }
                     self.emit(Change::HostUpdated(host.clone())).await;
                     self.db.upsert_host(&host).await?;
                 }
