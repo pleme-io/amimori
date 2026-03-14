@@ -27,6 +27,7 @@ pub struct StateEngine {
     vendor: Arc<dyn VendorLookup>,
     trigger_bus: Option<broadcast::Sender<TriggerEvent>>,
     pub convergence: Arc<crate::convergence::ConvergenceTracker>,
+    pub convergence_notifier: Arc<crate::convergence::ConvergenceNotifier>,
     filters: FilterConfig,
     buffer_size: usize,
 }
@@ -77,6 +78,7 @@ impl StateEngine {
             vendor: Arc::new(vendor),
             trigger_bus,
             convergence: Arc::new(crate::convergence::ConvergenceTracker::new(14)),
+            convergence_notifier: Arc::new(crate::convergence::ConvergenceNotifier::new()),
             filters: config.filters.clone(),
             buffer_size: config.storage.event_buffer_size,
         })
@@ -101,6 +103,7 @@ impl StateEngine {
             vendor,
             trigger_bus: None,
             convergence: Arc::new(crate::convergence::ConvergenceTracker::new(0)),
+            convergence_notifier: Arc::new(crate::convergence::ConvergenceNotifier::new()),
             filters,
             buffer_size,
         }
@@ -725,11 +728,23 @@ impl StateEngine {
 
         // Update convergence tracker based on change type
         match &change {
-            Change::HostAdded(_) => self.convergence.on_host_added(),
+            Change::HostAdded(_) => {
+                self.convergence.on_host_added();
+                self.convergence_notifier.signal();
+            }
             Change::ServiceChanged { change_type: ChangeType::Added, .. } => {
                 self.convergence.on_service_added();
+                self.convergence_notifier.signal();
             }
-            Change::NetworkChanged { .. } => self.convergence.reset(),
+            Change::NetworkChanged { .. } => {
+                self.convergence.reset();
+                self.convergence_notifier.signal();
+            }
+            Change::HostUpdated(_) | Change::WifiUpdated(_) => {
+                // Updates don't change convergence score but signal waiters
+                // so they can re-check (incremental state advancement)
+                self.convergence_notifier.signal();
+            }
             _ => {}
         }
 

@@ -216,6 +216,57 @@ impl std::fmt::Display for ConvergencePhase {
     }
 }
 
+/// A tokio::sync::Notify that fires when convergence phase transitions
+/// to Converged (or changes at all). Allows zero-polling wait.
+pub struct ConvergenceNotifier {
+    notify: tokio::sync::Notify,
+}
+
+impl ConvergenceNotifier {
+    pub fn new() -> Self {
+        Self {
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Signal that convergence state may have changed.
+    pub fn signal(&self) {
+        self.notify.notify_waiters();
+    }
+
+    /// Wait until signaled. Returns immediately if already signaled.
+    pub async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
+
+impl ConvergenceTracker {
+    /// Wait for convergence without polling. Uses a Notify to wake
+    /// when state changes, then checks the score. Returns when
+    /// score >= threshold or timeout expires.
+    pub async fn wait_for_convergence(
+        &self,
+        notifier: &ConvergenceNotifier,
+        threshold: f32,
+        timeout: std::time::Duration,
+    ) -> ConvergenceScore {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            let score = self.score();
+            if score.score >= threshold {
+                return score;
+            }
+
+            // Wait for next state change or timeout
+            tokio::select! {
+                () = notifier.wait() => continue,
+                () = tokio::time::sleep_until(deadline) => return self.score(),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +343,40 @@ mod tests {
         let score = tracker.score();
         assert_eq!(score.phase, ConvergencePhase::Converged);
         assert!(score.score >= 0.95);
+    }
+
+    #[tokio::test]
+    async fn wait_for_convergence_returns_immediately_when_converged() {
+        let tracker = ConvergenceTracker::new(0);
+        let notifier = ConvergenceNotifier::new();
+        // Set up fully converged state
+        *tracker.last_new_host.lock().unwrap() = Utc::now() - chrono::Duration::hours(1);
+        *tracker.last_new_service.lock().unwrap() = Utc::now() - chrono::Duration::hours(1);
+        tracker.stable_arp_cycles.store(100, Ordering::Relaxed);
+        tracker.stable_nmap_cycles.store(50, Ordering::Relaxed);
+
+        let score = tracker.wait_for_convergence(
+            &notifier,
+            0.95,
+            std::time::Duration::from_secs(1),
+        ).await;
+        assert!(score.score >= 0.95);
+        assert_eq!(score.phase, ConvergencePhase::Converged);
+    }
+
+    #[tokio::test]
+    async fn wait_for_convergence_times_out() {
+        let tracker = ConvergenceTracker::new(0);
+        let notifier = ConvergenceNotifier::new();
+        // Fresh tracker — not converged
+
+        let score = tracker.wait_for_convergence(
+            &notifier,
+            0.95,
+            std::time::Duration::from_millis(100), // very short timeout
+        ).await;
+        // Should return current (low) score, not panic
+        assert!(score.score < 0.95);
     }
 
     #[test]

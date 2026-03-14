@@ -71,6 +71,39 @@ impl NetworkProfiler for ProfilerService {
         }))
     }
 
+    async fn wait_for_convergence(
+        &self,
+        request: Request<proto::ConvergenceRequest>,
+    ) -> Result<Response<proto::ConvergenceStatus>, Status> {
+        let req = request.into_inner();
+        let threshold = if req.threshold <= 0.0 { 0.95 } else { req.threshold };
+        let timeout = if req.timeout_secs == 0 { 300 } else { req.timeout_secs };
+
+        let score = self.engine.convergence.wait_for_convergence(
+            &self.engine.convergence_notifier,
+            threshold,
+            std::time::Duration::from_secs(timeout as u64),
+        ).await;
+
+        let enriched = self.engine.state.hosts.iter()
+            .filter(|e| !e.value().fingerprints.is_empty())
+            .count() as u32;
+
+        Ok(Response::new(proto::ConvergenceStatus {
+            score: score.score,
+            phase: score.phase.to_string(),
+            since_new_host_secs: score.since_new_host,
+            since_new_service_secs: score.since_new_service,
+            stable_arp_cycles: score.stable_arp_cycles,
+            stable_nmap_cycles: score.stable_nmap_cycles,
+            collectors_reported: score.collectors_reported,
+            expected_collectors: score.expected_collectors,
+            uptime_secs: score.uptime,
+            total_hosts: self.engine.state.hosts.len() as u32,
+            enriched_hosts: enriched,
+        }))
+    }
+
     async fn get_changes(
         &self,
         request: Request<ChangesRequest>,

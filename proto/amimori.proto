@@ -7,6 +7,7 @@ service NetworkProfiler {
   rpc GetSnapshot(SnapshotRequest) returns (NetworkSnapshot);
   rpc GetChanges(ChangesRequest) returns (ChangesResponse);
   rpc GetConvergence(Empty) returns (ConvergenceStatus);
+  rpc WaitForConvergence(ConvergenceRequest) returns (ConvergenceStatus);
   rpc Subscribe(SubscribeRequest) returns (stream DeltaUpdate);
   rpc GetHost(HostRequest) returns (Host);
   rpc ListInterfaces(Empty) returns (InterfaceList);
@@ -32,6 +33,11 @@ message ChangesRequest {
 message ChangesResponse {
   repeated DeltaUpdate events = 1;
   uint64 current_sequence = 2;
+}
+
+message ConvergenceRequest {
+  float threshold = 1;        // score threshold (default 0.95)
+  uint32 timeout_secs = 2;    // max wait time (default 300 = 5min)
 }
 
 message HostRequest {
