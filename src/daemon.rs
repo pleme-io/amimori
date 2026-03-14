@@ -151,6 +151,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     ));
     tracing::info!("mDNS discovery enabled");
 
+    // Passive TCP/DHCP fingerprinting — captures packets via BPF/AF_PACKET.
+    // Safety level 0 (passive, read-only). Requires root (daemon is root).
+    actors.push((
+        Box::new(collector::passive::PassiveCollector::new(&config, Arc::clone(&engine))),
+        ActorConfig::interval_only(),
+    ));
+    tracing::info!("passive TCP fingerprinting enabled");
+
     if actors.is_empty() {
         anyhow::bail!(
             "no collector actors could be initialized — check config and tool availability"

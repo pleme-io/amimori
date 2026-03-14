@@ -23,6 +23,8 @@ prost-types = "0.13"
 # Network
 network-interface = "2"
 mdns-sd = "0.18"
+pnet = "0.35"          # Raw packet capture (BPF on macOS, AF_PACKET on Linux)
+etherparse = "0.16"    # Zero-copy packet parsing
 
 # Storage (Sea stack)
 sea-orm = { version = "1", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-chrono"] }
