@@ -21,14 +21,8 @@ use proto::{
     Service, ServiceChange, SnapshotRequest, SubscribeRequest, WifiNetwork, WifiNetworkList,
 };
 
-pub struct ProfilerService {
+struct ProfilerService {
     engine: Arc<StateEngine>,
-}
-
-impl ProfilerService {
-    pub fn new(engine: Arc<StateEngine>) -> Self {
-        Self { engine }
-    }
 }
 
 #[tonic::async_trait]
@@ -37,15 +31,19 @@ impl NetworkProfiler for ProfilerService {
         &self,
         request: Request<SnapshotRequest>,
     ) -> Result<Response<NetworkSnapshot>, Status> {
-        let req = request.into_inner();
-        let filter = if req.interface.is_empty() {
-            None
-        } else {
-            Some(req.interface.as_str())
+        let filter = {
+            let iface = &request.get_ref().interface;
+            if iface.is_empty() {
+                None
+            } else {
+                Some(iface.clone())
+            }
         };
 
-        let snapshot = build_snapshot(&self.engine, filter);
-        Ok(Response::new(snapshot))
+        Ok(Response::new(build_snapshot(
+            &self.engine,
+            filter.as_deref(),
+        )))
     }
 
     type SubscribeStream = Pin<Box<dyn Stream<Item = Result<DeltaUpdate, Status>> + Send>>;
@@ -58,56 +56,47 @@ impl NetworkProfiler for ProfilerService {
         let (tx, rx) = mpsc::channel(256);
 
         // Replay events since requested sequence
-        let replay = self.engine.events_since(req.since_sequence).await;
-        for event in replay {
-            let update = delta_to_proto(&event);
-            if tx.send(Ok(update)).await.is_err() {
-                // Client already disconnected
-                let empty = ReceiverStream::new(rx);
-                return Ok(Response::new(Box::pin(empty)));
+        for event in self.engine.events_since(req.since_sequence).await {
+            if tx.send(Ok(delta_to_proto(&event))).await.is_err() {
+                return Ok(Response::new(Box::pin(ReceiverStream::new(rx))));
             }
         }
 
-        // Subscribe to live updates
+        // Stream live updates
         let mut live_rx = self.engine.subscribe().await;
         tokio::spawn(async move {
             while let Some(event) = live_rx.recv().await {
-                let update = delta_to_proto(&event);
-                if tx.send(Ok(update)).await.is_err() {
+                if tx.send(Ok(delta_to_proto(&event))).await.is_err() {
                     break;
                 }
             }
         });
 
-        let stream = ReceiverStream::new(rx);
-        Ok(Response::new(Box::pin(stream)))
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
     async fn get_host(
         &self,
         request: Request<HostRequest>,
     ) -> Result<Response<Host>, Status> {
-        let addr = &request.into_inner().address;
-        let host = self
-            .engine
+        let addr = &request.get_ref().address;
+        self.engine
             .get_host(addr)
-            .ok_or_else(|| Status::not_found(format!("host {addr} not found")))?;
-
-        Ok(Response::new(host_to_proto(&host)))
+            .map(|h| Response::new(host_to_proto(&h)))
+            .ok_or_else(|| Status::not_found(format!("host {addr} not found")))
     }
 
     async fn list_interfaces(
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<InterfaceList>, Status> {
-        let interfaces: Vec<NetworkInterface> = self
+        let interfaces = self
             .engine
             .state
             .interfaces
             .iter()
-            .map(|entry| iface_to_proto(entry.value()))
+            .map(|e| iface_to_proto(e.value()))
             .collect();
-
         Ok(Response::new(InterfaceList { interfaces }))
     }
 
@@ -115,14 +104,13 @@ impl NetworkProfiler for ProfilerService {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<WifiNetworkList>, Status> {
-        let networks: Vec<WifiNetwork> = self
+        let networks = self
             .engine
             .state
             .wifi_networks
             .iter()
-            .map(|entry| wifi_to_proto(entry.value()))
+            .map(|e| wifi_to_proto(e.value()))
             .collect();
-
         Ok(Response::new(WifiNetworkList { networks }))
     }
 }
@@ -131,16 +119,18 @@ impl NetworkProfiler for ProfilerService {
 
 pub async fn serve(
     engine: Arc<StateEngine>,
-    port: u16,
+    addr: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let addr = format!("0.0.0.0:{port}").parse()?;
-    let service = ProfilerService::new(engine);
-
-    tracing::info!("gRPC server listening on {addr}");
+    let addr = addr.parse()?;
+    tracing::info!(%addr, "gRPC server listening");
 
     tonic::transport::Server::builder()
-        .add_service(NetworkProfilerServer::new(service))
+        // Pre-warm the accept loop — tonic handles connection concurrency internally
+        // via tokio tasks but we configure limits to prevent resource exhaustion.
+        .concurrency_limit_per_connection(64)
+        .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
+        .add_service(NetworkProfilerServer::new(ProfilerService { engine }))
         .serve_with_shutdown(addr, cancel.cancelled_owned())
         .await?;
 
@@ -148,12 +138,12 @@ pub async fn serve(
     Ok(())
 }
 
-// ── Proto conversion helpers ───────────────────────────────────────────────
+// ── Proto conversions ──────────────────────────────────────────────────────
 
 fn build_snapshot(engine: &StateEngine, filter: Option<&str>) -> NetworkSnapshot {
-    let now = Utc::now();
+    let seq = engine.state.sequence.load(std::sync::atomic::Ordering::Relaxed);
 
-    let interfaces: Vec<NetworkInterface> = engine
+    let interfaces = engine
         .state
         .interfaces
         .iter()
@@ -161,7 +151,7 @@ fn build_snapshot(engine: &StateEngine, filter: Option<&str>) -> NetworkSnapshot
         .map(|e| iface_to_proto(e.value()))
         .collect();
 
-    let hosts: Vec<Host> = engine
+    let hosts = engine
         .state
         .hosts
         .iter()
@@ -169,7 +159,7 @@ fn build_snapshot(engine: &StateEngine, filter: Option<&str>) -> NetworkSnapshot
         .map(|e| host_to_proto(e.value()))
         .collect();
 
-    let wifi_networks: Vec<WifiNetwork> = engine
+    let wifi_networks = engine
         .state
         .wifi_networks
         .iter()
@@ -177,130 +167,110 @@ fn build_snapshot(engine: &StateEngine, filter: Option<&str>) -> NetworkSnapshot
         .map(|e| wifi_to_proto(e.value()))
         .collect();
 
-    let seq = engine
-        .state
-        .sequence
-        .load(std::sync::atomic::Ordering::Relaxed);
-
     NetworkSnapshot {
         interfaces,
         hosts,
         wifi_networks,
         sequence: seq,
-        timestamp: Some(to_timestamp(now)),
+        timestamp: Some(chrono_to_proto(Utc::now())),
     }
 }
 
-fn host_to_proto(host: &HostInfo) -> Host {
-    let services: Vec<Service> = host
-        .services
-        .iter()
-        .map(|s| Service {
-            port: u32::from(s.port),
-            protocol: s.protocol.clone(),
-            name: s.name.clone(),
-            version: s.version.clone(),
-            state: s.state.clone(),
-        })
-        .collect();
-
+fn host_to_proto(h: &HostInfo) -> Host {
     Host {
-        mac: host.mac.clone(),
-        vendor: host.vendor.clone(),
-        ipv4: host
-            .addresses
-            .iter()
-            .filter(|a| a.is_ipv4())
-            .map(ToString::to_string)
-            .collect(),
-        ipv6: host
-            .addresses
-            .iter()
-            .filter(|a| a.is_ipv6())
-            .map(ToString::to_string)
-            .collect(),
-        hostname: host.hostname.clone().unwrap_or_default(),
-        os_hint: host.os_hint.clone().unwrap_or_default(),
-        services,
-        interface: host.interface.clone(),
-        first_seen: Some(to_timestamp(host.first_seen)),
-        last_seen: Some(to_timestamp(host.last_seen)),
+        mac: h.mac.clone(),
+        vendor: h.vendor.clone(),
+        ipv4: h.addresses.iter().filter(|a| a.is_ipv4()).map(ToString::to_string).collect(),
+        ipv6: h.addresses.iter().filter(|a| a.is_ipv6()).map(ToString::to_string).collect(),
+        hostname: h.hostname.clone().unwrap_or_default(),
+        os_hint: h.os_hint.clone().unwrap_or_default(),
+        services: h.services.iter().map(svc_to_proto).collect(),
+        interface: h.interface.clone(),
+        first_seen: Some(chrono_to_proto(h.first_seen)),
+        last_seen: Some(chrono_to_proto(h.last_seen)),
     }
 }
 
-fn iface_to_proto(iface: &InterfaceInfo) -> NetworkInterface {
+fn iface_to_proto(i: &InterfaceInfo) -> NetworkInterface {
     NetworkInterface {
-        name: iface.name.clone(),
-        mac: iface.mac.clone(),
-        ipv4: iface.ipv4.iter().map(ToString::to_string).collect(),
-        ipv6: iface.ipv6.iter().map(ToString::to_string).collect(),
-        gateway: iface.gateway.clone(),
-        subnet: iface.subnet.clone(),
-        is_up: iface.is_up,
-        kind: iface.kind.to_string(),
-        dns: iface.dns.clone(),
+        name: i.name.clone(),
+        mac: i.mac.clone(),
+        ipv4: i.ipv4.iter().map(ToString::to_string).collect(),
+        ipv6: i.ipv6.iter().map(ToString::to_string).collect(),
+        gateway: i.gateway.clone(),
+        subnet: i.subnet.clone(),
+        is_up: i.is_up,
+        kind: i.kind.to_string(),
+        dns: i.dns.clone(),
     }
 }
 
-fn wifi_to_proto(wifi: &WifiInfo) -> WifiNetwork {
+fn wifi_to_proto(w: &WifiInfo) -> WifiNetwork {
     WifiNetwork {
-        ssid: wifi.ssid.clone(),
-        bssid: wifi.bssid.clone(),
-        rssi: wifi.rssi,
-        noise: wifi.noise,
-        channel: wifi.channel,
-        band: wifi.band.clone(),
-        security: wifi.security.clone(),
-        interface: wifi.interface.clone(),
+        ssid: w.ssid.clone(),
+        bssid: w.bssid.clone(),
+        rssi: w.rssi,
+        noise: w.noise,
+        channel: w.channel,
+        band: w.band.clone(),
+        security: w.security.clone(),
+        interface: w.interface.clone(),
+    }
+}
+
+fn svc_to_proto(s: &ServiceInfo) -> Service {
+    Service {
+        port: u32::from(s.port),
+        protocol: s.protocol.clone(),
+        name: s.name.clone(),
+        version: s.version.clone(),
+        state: s.state.clone(),
     }
 }
 
 fn delta_to_proto(event: &DeltaEvent) -> DeltaUpdate {
     let change = match &event.change {
-        Change::HostAdded(host) => proto::delta_update::Change::HostAdded(host_to_proto(host)),
-        Change::HostRemoved { mac } => {
-            proto::delta_update::Change::HostRemoved(Host {
-                mac: mac.clone(),
-                ..Default::default()
-            })
-        }
-        Change::HostUpdated(host) => proto::delta_update::Change::HostUpdated(host_to_proto(host)),
+        Change::HostAdded(h) => proto::delta_update::Change::HostAdded(host_to_proto(h)),
+        Change::HostRemoved { mac } => proto::delta_update::Change::HostRemoved(Host {
+            mac: mac.clone(),
+            ..Default::default()
+        }),
+        Change::HostUpdated(h) => proto::delta_update::Change::HostUpdated(host_to_proto(h)),
         Change::ServiceChanged {
             mac,
             service,
             change_type,
         } => proto::delta_update::Change::ServiceChanged(ServiceChange {
             host_mac: mac.clone(),
-            service: Some(Service {
-                port: u32::from(service.port),
-                protocol: service.protocol.clone(),
-                name: service.name.clone(),
-                version: service.version.clone(),
-                state: service.state.clone(),
-            }),
+            service: Some(svc_to_proto(service)),
             change_type: change_type.to_string(),
         }),
-        Change::WifiAdded(wifi) => proto::delta_update::Change::WifiAdded(wifi_to_proto(wifi)),
-        Change::WifiRemoved { bssid } => {
-            proto::delta_update::Change::WifiRemoved(WifiNetwork {
-                bssid: bssid.clone(),
+        Change::WifiAdded(w) => proto::delta_update::Change::WifiAdded(wifi_to_proto(w)),
+        Change::WifiRemoved { bssid } => proto::delta_update::Change::WifiRemoved(WifiNetwork {
+            bssid: bssid.clone(),
+            ..Default::default()
+        }),
+        Change::WifiUpdated(w) => proto::delta_update::Change::WifiUpdated(wifi_to_proto(w)),
+        Change::InterfaceChanged(i) => {
+            proto::delta_update::Change::InterfaceChanged(iface_to_proto(i))
+        }
+        Change::NetworkChanged { interface, .. } => {
+            // Map network transitions to interface change in proto
+            proto::delta_update::Change::InterfaceChanged(NetworkInterface {
+                name: interface.clone(),
                 ..Default::default()
             })
-        }
-        Change::WifiUpdated(wifi) => proto::delta_update::Change::WifiUpdated(wifi_to_proto(wifi)),
-        Change::InterfaceChanged(iface) => {
-            proto::delta_update::Change::InterfaceChanged(iface_to_proto(iface))
         }
     };
 
     DeltaUpdate {
         sequence: event.sequence,
-        timestamp: Some(to_timestamp(event.timestamp)),
+        timestamp: Some(chrono_to_proto(event.timestamp)),
         change: Some(change),
     }
 }
 
-fn to_timestamp(dt: chrono::DateTime<Utc>) -> Timestamp {
+fn chrono_to_proto(dt: chrono::DateTime<Utc>) -> Timestamp {
     Timestamp {
         seconds: dt.timestamp(),
         nanos: dt.timestamp_subsec_nanos() as i32,

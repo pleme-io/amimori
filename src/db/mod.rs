@@ -13,6 +13,7 @@ use sea_orm::{
 use sea_orm_migration::MigratorTrait;
 
 use crate::model::{HostInfo, InterfaceInfo, InterfaceKind, ServiceInfo, WifiInfo};
+use crate::traits::StorageBackend;
 
 /// Persistent storage backed by SQLite via SeaORM.
 pub struct Database {
@@ -20,27 +21,84 @@ pub struct Database {
 }
 
 impl Database {
-    /// Open (or create) the SQLite database and run migrations.
+    /// Open (or create) the SQLite database, run migrations, and configure for production.
+    ///
+    /// Creates parent directories if needed. Applies all pending migrations.
+    /// Enables WAL journal mode for concurrent read/write.
     pub async fn open(path: &Path) -> anyhow::Result<Self> {
+        // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "cannot create database directory {}: {e}",
+                    parent.display()
+                )
+            })?;
         }
 
         let url = format!("sqlite://{}?mode=rwc", path.display());
-        let opts = ConnectOptions::new(&url);
-        let conn = SeaDatabase::connect(opts).await?;
+        let mut opts = ConnectOptions::new(&url);
+        opts.sqlx_logging(false);
 
-        // Run migrations
-        migration::Migrator::up(&conn, None).await?;
+        // Connection pool: pre-heat connections for concurrent collector writes.
+        // SQLite WAL mode supports concurrent readers + single writer, but having
+        // a small pool avoids contention on the writer lock.
+        opts.min_connections(2);
+        opts.max_connections(8);
+        opts.connect_timeout(std::time::Duration::from_secs(5));
+        opts.idle_timeout(std::time::Duration::from_secs(300));
 
-        // Enable WAL mode for concurrent reads
-        sea_orm::ConnectionTrait::execute_unprepared(
-            &conn,
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
-        )
-        .await?;
+        tracing::debug!(path = %path.display(), "connecting to database (pool: 2-8 connections)");
 
-        tracing::info!("database opened at {}", path.display());
+        let conn = SeaDatabase::connect(opts).await.map_err(|e| {
+            anyhow::anyhow!("cannot open database at {}: {e}", path.display())
+        })?;
+
+        // Run pending migrations
+        tracing::debug!("running database migrations");
+        migration::Migrator::up(&conn, None).await.map_err(|e| {
+            anyhow::anyhow!("database migration failed: {e}")
+        })?;
+
+        // Configure SQLite for concurrent access and durability
+        let pragmas = [
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA synchronous=NORMAL",
+            "PRAGMA foreign_keys=ON",
+            "PRAGMA busy_timeout=5000",
+        ];
+        for pragma in &pragmas {
+            sea_orm::ConnectionTrait::execute_unprepared(&conn, pragma)
+                .await
+                .map_err(|e| anyhow::anyhow!("{pragma} failed: {e}"))?;
+        }
+
+        // Quick integrity check
+        let integrity: Vec<sea_orm::JsonValue> =
+            sea_orm::ConnectionTrait::query_all(
+                &conn,
+                sea_orm::Statement::from_string(
+                    sea_orm::DatabaseBackend::Sqlite,
+                    "PRAGMA quick_check".to_string(),
+                ),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("integrity check failed: {e}"))?
+            .iter()
+            .map(|row| {
+                row.try_get_by_index::<String>(0)
+                    .unwrap_or_else(|_| "unknown".to_string())
+            })
+            .map(serde_json::Value::String)
+            .collect();
+
+        let is_ok = integrity.first().and_then(|v| v.as_str()) == Some("ok");
+        if !is_ok {
+            tracing::error!(?integrity, "database integrity check failed");
+            anyhow::bail!("database integrity check failed at {}", path.display());
+        }
+
+        tracing::info!(path = %path.display(), "database ready");
         Ok(Self { conn })
     }
 
@@ -73,7 +131,8 @@ impl Database {
                 hostname: Set(host.hostname.clone()),
                 os_hint: Set(host.os_hint.clone()),
                 interface: Set(host.interface.clone()),
-                first_seen: sea_orm::ActiveValue::NotSet,
+                network_id: Set(host.network_id.clone()),
+                first_seen: sea_orm::ActiveValue::NotSet, // never overwrite creation time
                 last_seen: Set(host.last_seen),
             };
             active.update(&self.conn).await?;
@@ -86,26 +145,23 @@ impl Database {
                 hostname: Set(host.hostname.clone()),
                 os_hint: Set(host.os_hint.clone()),
                 interface: Set(host.interface.clone()),
+                network_id: Set(host.network_id.clone()),
                 first_seen: Set(host.first_seen),
                 last_seen: Set(host.last_seen),
             };
             active.insert(&self.conn).await?;
         }
 
-        // Sync services
         self.sync_services(&host.mac, &host.services).await?;
-
         Ok(())
     }
 
     async fn sync_services(&self, mac: &str, services: &[ServiceInfo]) -> anyhow::Result<()> {
-        // Delete existing services for this host
         entity::service::Entity::delete_many()
             .filter(entity::service::Column::HostMac.eq(mac))
             .exec(&self.conn)
             .await?;
 
-        // Insert current services
         for svc in services {
             let active = entity::service::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
@@ -122,18 +178,19 @@ impl Database {
     }
 
     pub async fn remove_host(&self, mac: &str) -> anyhow::Result<()> {
+        // CASCADE will also remove services
         entity::host::Entity::delete_by_id(mac)
             .exec(&self.conn)
             .await?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn get_host(&self, mac: &str) -> anyhow::Result<Option<HostInfo>> {
-        let row = entity::host::Entity::find_by_id(mac)
+        let Some(row) = entity::host::Entity::find_by_id(mac)
             .one(&self.conn)
-            .await?;
-
-        let Some(row) = row else {
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -146,33 +203,39 @@ impl Database {
     }
 
     pub async fn all_hosts(&self) -> anyhow::Result<Vec<HostInfo>> {
-        let hosts = entity::host::Entity::find().all(&self.conn).await?;
-        let mut result = Vec::with_capacity(hosts.len());
+        // Batch: two queries total (hosts + all services) instead of N+1.
+        let (hosts, all_services) = tokio::try_join!(
+            entity::host::Entity::find().all(&self.conn),
+            entity::service::Entity::find().all(&self.conn),
+        )?;
 
-        for host in &hosts {
-            let services = entity::service::Entity::find()
-                .filter(entity::service::Column::HostMac.eq(&host.mac))
-                .all(&self.conn)
-                .await?;
-            result.push(row_to_host_info(host, &services));
+        // Group services by host MAC for O(1) lookup per host.
+        let mut services_by_mac: std::collections::HashMap<String, Vec<entity::service::Model>> =
+            std::collections::HashMap::with_capacity(hosts.len());
+        for svc in all_services {
+            services_by_mac
+                .entry(svc.host_mac.clone())
+                .or_default()
+                .push(svc);
         }
 
-        Ok(result)
+        Ok(hosts
+            .iter()
+            .map(|host| {
+                let services = services_by_mac
+                    .get(&host.mac)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                row_to_host_info(host, services)
+            })
+            .collect())
     }
 
     // ── Interface operations ───────────────────────────────────────────
 
     pub async fn upsert_interface(&self, iface: &InterfaceInfo) -> anyhow::Result<()> {
-        let ipv4: Vec<String> = iface
-            .ipv4
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        let ipv6: Vec<String> = iface
-            .ipv6
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        let ipv4: Vec<String> = iface.ipv4.iter().map(ToString::to_string).collect();
+        let ipv6: Vec<String> = iface.ipv6.iter().map(ToString::to_string).collect();
 
         let existing = entity::interface::Entity::find_by_id(&iface.name)
             .one(&self.conn)
@@ -243,7 +306,7 @@ impl Database {
         Ok(rows.into_iter().map(row_to_wifi_info).collect())
     }
 
-    // ── Restore full state from DB ─────────────────────────────────────
+    // ── Bulk restore ───────────────────────────────────────────────────
 
     /// Load all persisted state. Called once at daemon startup.
     pub async fn load_all(
@@ -262,20 +325,20 @@ fn row_to_host_info(
     row: &entity::host::Model,
     services: &[entity::service::Model],
 ) -> HostInfo {
-    let ipv4: Vec<String> = serde_json::from_str(&row.ipv4_json).unwrap_or_default();
-    let ipv6: Vec<String> = serde_json::from_str(&row.ipv6_json).unwrap_or_default();
+    let ipv4: Vec<String> = serde_json::from_str(&row.ipv4_json).unwrap_or_else(|e| {
+        tracing::warn!(mac = %row.mac, error = %e, "corrupt ipv4_json in database");
+        Vec::new()
+    });
+    let ipv6: Vec<String> = serde_json::from_str(&row.ipv6_json).unwrap_or_else(|e| {
+        tracing::warn!(mac = %row.mac, error = %e, "corrupt ipv6_json in database");
+        Vec::new()
+    });
 
-    let mut addresses: Vec<IpAddr> = Vec::new();
-    for s in &ipv4 {
-        if let Ok(ip) = s.parse() {
-            addresses.push(ip);
-        }
-    }
-    for s in &ipv6 {
-        if let Ok(ip) = s.parse() {
-            addresses.push(ip);
-        }
-    }
+    let addresses: Vec<IpAddr> = ipv4
+        .iter()
+        .chain(ipv6.iter())
+        .filter_map(|s| s.parse().ok())
+        .collect();
 
     let svcs = services
         .iter()
@@ -296,15 +359,25 @@ fn row_to_host_info(
         os_hint: row.os_hint.clone(),
         services: svcs,
         interface: row.interface.clone(),
+        network_id: row.network_id.clone(),
         first_seen: row.first_seen.with_timezone(&Utc),
         last_seen: row.last_seen.with_timezone(&Utc),
     }
 }
 
 fn row_to_interface_info(row: entity::interface::Model) -> InterfaceInfo {
-    let ipv4: Vec<String> = serde_json::from_str(&row.ipv4_json).unwrap_or_default();
-    let ipv6: Vec<String> = serde_json::from_str(&row.ipv6_json).unwrap_or_default();
-    let dns: Vec<String> = serde_json::from_str(&row.dns_json).unwrap_or_default();
+    let ipv4: Vec<String> = serde_json::from_str(&row.ipv4_json).unwrap_or_else(|e| {
+        tracing::warn!(name = %row.name, error = %e, "corrupt ipv4_json in database");
+        Vec::new()
+    });
+    let ipv6: Vec<String> = serde_json::from_str(&row.ipv6_json).unwrap_or_else(|e| {
+        tracing::warn!(name = %row.name, error = %e, "corrupt ipv6_json in database");
+        Vec::new()
+    });
+    let dns: Vec<String> = serde_json::from_str(&row.dns_json).unwrap_or_else(|e| {
+        tracing::warn!(name = %row.name, error = %e, "corrupt dns_json in database");
+        Vec::new()
+    });
 
     let ipv4_addrs = ipv4.iter().filter_map(|s| s.parse().ok()).collect();
     let ipv6_addrs = ipv6.iter().filter_map(|s| s.parse().ok()).collect();
@@ -340,5 +413,34 @@ fn row_to_wifi_info(row: entity::wifi_network::Model) -> WifiInfo {
         band: row.band,
         security: row.security,
         interface: row.interface,
+    }
+}
+
+// ── StorageBackend trait implementation ─────────────────────────────────────
+
+#[async_trait::async_trait]
+impl StorageBackend for Database {
+    async fn upsert_host(&self, host: &HostInfo) -> anyhow::Result<()> {
+        self.upsert_host(host).await
+    }
+
+    async fn remove_host(&self, mac: &str) -> anyhow::Result<()> {
+        self.remove_host(mac).await
+    }
+
+    async fn upsert_interface(&self, iface: &InterfaceInfo) -> anyhow::Result<()> {
+        self.upsert_interface(iface).await
+    }
+
+    async fn upsert_wifi(&self, wifi: &WifiInfo) -> anyhow::Result<()> {
+        self.upsert_wifi(wifi).await
+    }
+
+    async fn remove_wifi(&self, bssid: &str) -> anyhow::Result<()> {
+        self.remove_wifi(bssid).await
+    }
+
+    async fn load_all(&self) -> anyhow::Result<(Vec<InterfaceInfo>, Vec<HostInfo>, Vec<WifiInfo>)> {
+        self.load_all().await
     }
 }

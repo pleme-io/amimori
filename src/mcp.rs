@@ -1,13 +1,7 @@
-//! MCP server for amimori. Queries the daemon's gRPC endpoint for network state.
+//! MCP server for amimori. Queries the daemon's gRPC endpoint.
 //!
-//! Tools:
-//!   network_snapshot    — full snapshot of all profiled networks
-//!   network_hosts       — list discovered hosts with optional filters
-//!   network_changes     — recent network change events
-//!   network_host_detail — detailed info on a specific host by MAC or IP
-//!   wifi_networks       — WiFi networks visible from current location
-//!   network_interfaces  — all monitored network interfaces with status
-//!   network_stats       — profiler statistics and health
+//! 7 tools: network_snapshot, network_hosts, network_changes,
+//! network_host_detail, wifi_networks, network_interfaces, network_stats
 
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -19,34 +13,34 @@ use rmcp::{
 use serde::Deserialize;
 use std::fmt::Write;
 
-use crate::grpc::proto::{
-    self,
-    network_profiler_client::NetworkProfilerClient,
-};
+use crate::grpc::proto::{self, network_profiler_client::NetworkProfilerClient};
 
-// ── Tool input types ───────────────────────────────────────────────────────
+// ── Tool input schemas ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SnapshotInput {
-    #[schemars(description = "Optional: filter by interface name (e.g. 'en0')")]
+    #[schemars(description = "Filter by interface name (e.g. 'en0'). Omit for all.")]
     interface: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct HostsInput {
-    #[schemars(description = "Optional: filter by interface name")]
+    #[schemars(description = "Filter by interface name")]
     interface: Option<String>,
 
-    #[schemars(description = "Optional: filter by vendor name (case-insensitive substring)")]
+    #[schemars(description = "Filter by vendor name (case-insensitive substring)")]
     vendor: Option<String>,
+
+    #[schemars(description = "Filter by port number (show only hosts with this port open)")]
+    port: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ChangesInput {
-    #[schemars(description = "Number of recent events to return (default 50)")]
+    #[schemars(description = "Max events to return (default 50, max 500)")]
     limit: Option<usize>,
 
-    #[schemars(description = "Return events since this sequence number (0 = all)")]
+    #[schemars(description = "Return events since this sequence number (0 = all available)")]
     since_sequence: Option<u64>,
 }
 
@@ -58,11 +52,14 @@ struct HostDetailInput {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct WifiInput {
-    #[schemars(description = "Optional: filter by interface name")]
+    #[schemars(description = "Filter by interface name")]
     interface: Option<String>,
 
-    #[schemars(description = "Optional: minimum signal strength (RSSI, e.g. -70)")]
+    #[schemars(description = "Minimum signal strength (RSSI, e.g. -70)")]
     min_rssi: Option<i32>,
+
+    #[schemars(description = "Filter by security type (substring, e.g. 'WPA3')")]
+    security: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -72,179 +69,72 @@ struct EmptyInput {}
 
 #[derive(Debug, Clone)]
 struct AmimoriMcp {
-    grpc_url: String,
+    /// Lazy-initialized, reusable gRPC channel. Tonic channels multiplex
+    /// requests over a single HTTP/2 connection — no per-call overhead.
+    channel: tonic::transport::Channel,
     tool_router: ToolRouter<Self>,
 }
 
 impl AmimoriMcp {
-    async fn client(
-        &self,
-    ) -> Result<NetworkProfilerClient<tonic::transport::Channel>, String> {
-        NetworkProfilerClient::connect(self.grpc_url.clone())
-            .await
-            .map_err(|e| format!("Cannot connect to amimori daemon at {}: {e}", self.grpc_url))
+    fn client(&self) -> NetworkProfilerClient<tonic::transport::Channel> {
+        NetworkProfilerClient::new(self.channel.clone())
     }
 }
 
 #[tool_router]
 impl AmimoriMcp {
-    fn new() -> Self {
-        let grpc_url = std::env::var("AMIMORI_GRPC_URL")
-            .unwrap_or_else(|_| "http://localhost:50051".to_string());
+    fn new(channel: tonic::transport::Channel) -> Self {
         Self {
-            grpc_url,
+            channel,
             tool_router: Self::tool_router(),
         }
     }
 
-    #[tool(description = "Get full snapshot of all profiled networks — interfaces, hosts, WiFi")]
+    #[tool(description = "Get full network snapshot — all interfaces, hosts, and WiFi networks")]
     async fn network_snapshot(&self, Parameters(input): Parameters<SnapshotInput>) -> String {
-        let mut client = match self.client().await {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
+        let mut client = self.client();
 
-        let req = proto::SnapshotRequest {
-            interface: input.interface.unwrap_or_default(),
-        };
-
-        match client.get_snapshot(req).await {
+        match client
+            .get_snapshot(proto::SnapshotRequest {
+                interface: input.interface.unwrap_or_default(),
+            })
+            .await
+        {
             Ok(resp) => format_snapshot(&resp.into_inner()),
-            Err(e) => format!("Error: {e}"),
+            Err(e) => format!("error: {e}"),
         }
     }
 
-    #[tool(description = "List discovered hosts with optional filters by interface or vendor")]
+    #[tool(description = "List discovered hosts with optional filters by interface, vendor, or port")]
     async fn network_hosts(&self, Parameters(input): Parameters<HostsInput>) -> String {
-        let mut client = match self.client().await {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
+        let mut client = self.client();
 
-        let req = proto::SnapshotRequest {
-            interface: input.interface.unwrap_or_default(),
-        };
-
-        match client.get_snapshot(req).await {
+        match client
+            .get_snapshot(proto::SnapshotRequest {
+                interface: input.interface.unwrap_or_default(),
+            })
+            .await
+        {
             Ok(resp) => {
-                let snapshot = resp.into_inner();
-                let mut hosts = snapshot.hosts;
+                let mut hosts = resp.into_inner().hosts;
 
-                // Apply vendor filter
                 if let Some(ref vendor) = input.vendor {
                     let v = vendor.to_lowercase();
                     hosts.retain(|h| h.vendor.to_lowercase().contains(&v));
                 }
+                if let Some(port) = input.port {
+                    hosts.retain(|h| h.services.iter().any(|s| s.port == port));
+                }
 
                 format_hosts(&hosts)
             }
-            Err(e) => format!("Error: {e}"),
+            Err(e) => format!("error: {e}"),
         }
     }
 
-    #[tool(description = "Get recent network change events (host added/removed, WiFi changes, etc.)")]
+    #[tool(description = "Get recent network change events (host/wifi added/removed/updated)")]
     async fn network_changes(&self, Parameters(input): Parameters<ChangesInput>) -> String {
-        let mut client = match self.client().await {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
-
-        let req = proto::SubscribeRequest {
-            since_sequence: input.since_sequence.unwrap_or(0),
-            interface: String::new(),
-        };
-
-        // Use the snapshot to get recent events
-        // (Subscribe returns a stream — for one-shot, we use snapshot + sequence)
-        match client.get_snapshot(proto::SnapshotRequest::default()).await {
-            Ok(resp) => {
-                let snapshot = resp.into_inner();
-                let limit = input.limit.unwrap_or(50);
-                let mut out = String::new();
-                let _ = writeln!(out, "Current sequence: {}", snapshot.sequence);
-                let _ = writeln!(out, "Hosts: {}, Interfaces: {}, WiFi networks: {}",
-                    snapshot.hosts.len(),
-                    snapshot.interfaces.len(),
-                    snapshot.wifi_networks.len(),
-                );
-                let _ = writeln!(out, "\n(Use network_snapshot for full state, or subscribe via gRPC for streaming changes)");
-                let _ = writeln!(out, "Requested since_sequence={}, limit={limit}", req.since_sequence);
-                out
-            }
-            Err(e) => format!("Error: {e}"),
-        }
-    }
-
-    #[tool(description = "Get detailed info on a specific host by MAC or IP address")]
-    async fn network_host_detail(
-        &self,
-        Parameters(input): Parameters<HostDetailInput>,
-    ) -> String {
-        let mut client = match self.client().await {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
-
-        let req = proto::HostRequest {
-            address: input.address,
-        };
-
-        match client.get_host(req).await {
-            Ok(resp) => format_host_detail(&resp.into_inner()),
-            Err(e) => format!("Error: {e}"),
-        }
-    }
-
-    #[tool(description = "List WiFi networks visible from current location")]
-    async fn wifi_networks(&self, Parameters(input): Parameters<WifiInput>) -> String {
-        let mut client = match self.client().await {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
-
-        match client
-            .list_wifi_networks(proto::Empty {})
-            .await
-        {
-            Ok(resp) => {
-                let mut networks = resp.into_inner().networks;
-
-                // Apply filters
-                if let Some(ref iface) = input.interface {
-                    networks.retain(|n| n.interface == *iface);
-                }
-                if let Some(min_rssi) = input.min_rssi {
-                    networks.retain(|n| n.rssi >= min_rssi);
-                }
-
-                // Sort by signal strength (strongest first)
-                networks.sort_by(|a, b| b.rssi.cmp(&a.rssi));
-
-                format_wifi(&networks)
-            }
-            Err(e) => format!("Error: {e}"),
-        }
-    }
-
-    #[tool(description = "List all monitored network interfaces with status")]
-    async fn network_interfaces(&self, Parameters(_input): Parameters<EmptyInput>) -> String {
-        let mut client = match self.client().await {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
-
-        match client.list_interfaces(proto::Empty {}).await {
-            Ok(resp) => format_interfaces(&resp.into_inner().interfaces),
-            Err(e) => format!("Error: {e}"),
-        }
-    }
-
-    #[tool(description = "Get profiler statistics and health")]
-    async fn network_stats(&self, Parameters(_input): Parameters<EmptyInput>) -> String {
-        let mut client = match self.client().await {
-            Ok(c) => c,
-            Err(e) => return e,
-        };
+        let mut client = self.client();
 
         match client
             .get_snapshot(proto::SnapshotRequest::default())
@@ -252,19 +142,98 @@ impl AmimoriMcp {
         {
             Ok(resp) => {
                 let snapshot = resp.into_inner();
+                let limit = input.limit.unwrap_or(50).min(500);
                 let mut out = String::new();
-                let _ = writeln!(out, "amimori profiler status: healthy");
-                let _ = writeln!(out, "gRPC endpoint: {}", self.grpc_url);
-                let _ = writeln!(out, "Event sequence: {}", snapshot.sequence);
-                let _ = writeln!(out, "Interfaces: {}", snapshot.interfaces.len());
-                let _ = writeln!(out, "Hosts: {}", snapshot.hosts.len());
-                let _ = writeln!(out, "WiFi networks: {}", snapshot.wifi_networks.len());
-                if let Some(ts) = snapshot.timestamp {
-                    let _ = writeln!(out, "Last update: {}s {}ns", ts.seconds, ts.nanos);
-                }
+                let _ = writeln!(out, "Current sequence: {}", snapshot.sequence);
+                let _ = writeln!(
+                    out,
+                    "State: {} hosts, {} interfaces, {} wifi networks",
+                    snapshot.hosts.len(),
+                    snapshot.interfaces.len(),
+                    snapshot.wifi_networks.len(),
+                );
+                let _ = writeln!(
+                    out,
+                    "\nUse gRPC Subscribe RPC for streaming deltas (since_sequence={}, limit={limit})",
+                    input.since_sequence.unwrap_or(0)
+                );
                 out
             }
-            Err(e) => format!("amimori profiler status: unavailable\nError: {e}"),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "Get detailed host info by MAC or IP address, including services")]
+    async fn network_host_detail(&self, Parameters(input): Parameters<HostDetailInput>) -> String {
+        let mut client = self.client();
+
+        match client
+            .get_host(proto::HostRequest {
+                address: input.address,
+            })
+            .await
+        {
+            Ok(resp) => format_host_detail(&resp.into_inner()),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "List visible WiFi networks, sorted by signal strength")]
+    async fn wifi_networks(&self, Parameters(input): Parameters<WifiInput>) -> String {
+        let mut client = self.client();
+
+        match client.list_wifi_networks(proto::Empty {}).await {
+            Ok(resp) => {
+                let mut networks = resp.into_inner().networks;
+
+                if let Some(ref iface) = input.interface {
+                    networks.retain(|n| n.interface == *iface);
+                }
+                if let Some(min_rssi) = input.min_rssi {
+                    networks.retain(|n| n.rssi >= min_rssi);
+                }
+                if let Some(ref sec) = input.security {
+                    let s = sec.to_lowercase();
+                    networks.retain(|n| n.security.to_lowercase().contains(&s));
+                }
+
+                networks.sort_by(|a, b| b.rssi.cmp(&a.rssi));
+                format_wifi(&networks)
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "List all monitored network interfaces with IP, gateway, DNS, and status")]
+    async fn network_interfaces(&self, Parameters(_): Parameters<EmptyInput>) -> String {
+        let mut client = self.client();
+
+        match client.list_interfaces(proto::Empty {}).await {
+            Ok(resp) => format_interfaces(&resp.into_inner().interfaces),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "Get profiler daemon health, statistics, and configuration")]
+    async fn network_stats(&self, Parameters(_): Parameters<EmptyInput>) -> String {
+        let mut client = self.client();
+
+        match client
+            .get_snapshot(proto::SnapshotRequest::default())
+            .await
+        {
+            Ok(resp) => {
+                let s = resp.into_inner();
+                let mut out = String::new();
+                let _ = writeln!(out, "amimori: healthy");
+                let _ = writeln!(out, "  status: connected");
+                let _ = writeln!(out, "  sequence: {}", s.sequence);
+                let _ = writeln!(out, "  interfaces: {}", s.interfaces.len());
+                let _ = writeln!(out, "  hosts: {}", s.hosts.len());
+                let _ = writeln!(out, "  wifi_networks: {}", s.wifi_networks.len());
+                out
+            }
+            Err(e) => format!("amimori: unavailable\nerror: {e}"),
         }
     }
 }
@@ -274,8 +243,8 @@ impl ServerHandler for AmimoriMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "amimori — continuous network profiler. Provides tools to query network state, \
-                 discovered hosts, WiFi networks, and change events."
+                "amimori — continuous network profiler. Query network state, \
+                 hosts, WiFi, and change events from the running daemon."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
@@ -284,50 +253,39 @@ impl ServerHandler for AmimoriMcp {
     }
 }
 
-// ── Formatting helpers ─────────────────────────────────────────────────────
+// ── Formatting ─────────────────────────────────────────────────────────────
 
-fn format_snapshot(snapshot: &proto::NetworkSnapshot) -> String {
+fn format_snapshot(s: &proto::NetworkSnapshot) -> String {
     let mut out = String::with_capacity(2048);
-    let _ = writeln!(out, "Network Snapshot (seq: {})", snapshot.sequence);
+    let _ = writeln!(out, "Network Snapshot (seq: {})\n", s.sequence);
 
-    let _ = writeln!(out, "\n--- Interfaces ({}) ---", snapshot.interfaces.len());
-    for iface in &snapshot.interfaces {
-        let status = if iface.is_up { "UP" } else { "DOWN" };
+    let _ = writeln!(out, "Interfaces ({})", s.interfaces.len());
+    for i in &s.interfaces {
+        let status = if i.is_up { "UP" } else { "DOWN" };
         let _ = writeln!(
-            out,
-            "  {}: {} [{}] {} ipv4={:?} gw={}",
-            iface.name, status, iface.kind, iface.mac, iface.ipv4, iface.gateway
+            out, "  {} [{}] {status} mac={} ipv4={:?} gw={}",
+            i.name, i.kind, i.mac, i.ipv4, i.gateway,
         );
     }
 
-    let _ = writeln!(out, "\n--- Hosts ({}) ---", snapshot.hosts.len());
-    for host in &snapshot.hosts {
+    let _ = writeln!(out, "\nHosts ({})", s.hosts.len());
+    for h in &s.hosts {
+        let svcs = if h.services.is_empty() {
+            String::new()
+        } else {
+            format!(" [{} svc]", h.services.len())
+        };
         let _ = writeln!(
-            out,
-            "  {} ({}) — {} ipv4={:?} on {}{}",
-            host.mac,
-            host.vendor,
-            host.hostname,
-            host.ipv4,
-            host.interface,
-            if host.services.is_empty() {
-                String::new()
-            } else {
-                format!(" [{} services]", host.services.len())
-            },
+            out, "  {} {} {:?} on {}{svcs}",
+            h.mac, h.vendor, h.ipv4, h.interface,
         );
     }
 
-    let _ = writeln!(
-        out,
-        "\n--- WiFi Networks ({}) ---",
-        snapshot.wifi_networks.len()
-    );
-    for wifi in &snapshot.wifi_networks {
+    let _ = writeln!(out, "\nWiFi ({})", s.wifi_networks.len());
+    for w in &s.wifi_networks {
         let _ = writeln!(
-            out,
-            "  {} ({}) ch{} {} rssi={} {}",
-            wifi.ssid, wifi.bssid, wifi.channel, wifi.band, wifi.rssi, wifi.security
+            out, "  {} ch{} {} rssi={} {}",
+            w.ssid, w.channel, w.band, w.rssi, w.security,
         );
     }
 
@@ -336,70 +294,58 @@ fn format_snapshot(snapshot: &proto::NetworkSnapshot) -> String {
 
 fn format_hosts(hosts: &[proto::Host]) -> String {
     let mut out = String::with_capacity(1024);
-    let _ = writeln!(out, "{} hosts discovered", hosts.len());
-    for host in hosts {
-        let svcs = if host.services.is_empty() {
-            String::new()
-        } else {
-            let ports: Vec<String> = host
-                .services
-                .iter()
-                .map(|s| {
-                    if s.name.is_empty() {
-                        format!("{}/{}", s.port, s.protocol)
-                    } else {
-                        format!("{}/{} ({})", s.port, s.protocol, s.name)
-                    }
-                })
-                .collect();
-            format!(" ports: {}", ports.join(", "))
-        };
-
+    let _ = writeln!(out, "{} hosts", hosts.len());
+    for h in hosts {
+        let svcs = h
+            .services
+            .iter()
+            .map(|s| {
+                if s.name.is_empty() {
+                    format!("{}/{}", s.port, s.protocol)
+                } else {
+                    format!("{}({})", s.port, s.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         let _ = writeln!(
-            out,
-            "  {} | {} | {} | {:?}{}",
-            host.mac,
-            host.vendor,
-            host.hostname,
-            host.ipv4,
-            svcs,
+            out, "  {} | {} | {} | {:?} {}",
+            h.mac, h.vendor, h.hostname, h.ipv4,
+            if svcs.is_empty() { String::new() } else { format!("| {svcs}") },
         );
     }
     out
 }
 
-fn format_host_detail(host: &proto::Host) -> String {
+fn format_host_detail(h: &proto::Host) -> String {
     let mut out = String::with_capacity(512);
-    let _ = writeln!(out, "Host: {}", host.mac);
-    let _ = writeln!(out, "  Vendor: {}", host.vendor);
-    let _ = writeln!(out, "  Hostname: {}", host.hostname);
-    let _ = writeln!(out, "  IPv4: {:?}", host.ipv4);
-    let _ = writeln!(out, "  IPv6: {:?}", host.ipv6);
-    let _ = writeln!(out, "  OS: {}", host.os_hint);
-    let _ = writeln!(out, "  Interface: {}", host.interface);
-
-    if !host.services.is_empty() {
-        let _ = writeln!(out, "  Services:");
-        for svc in &host.services {
+    let _ = writeln!(out, "MAC: {}", h.mac);
+    let _ = writeln!(out, "Vendor: {}", h.vendor);
+    let _ = writeln!(out, "Hostname: {}", h.hostname);
+    let _ = writeln!(out, "IPv4: {:?}", h.ipv4);
+    let _ = writeln!(out, "IPv6: {:?}", h.ipv6);
+    let _ = writeln!(out, "OS: {}", h.os_hint);
+    let _ = writeln!(out, "Interface: {}", h.interface);
+    if !h.services.is_empty() {
+        let _ = writeln!(out, "Services:");
+        for s in &h.services {
             let _ = writeln!(
-                out,
-                "    {}/{} {} {} [{}]",
-                svc.port, svc.protocol, svc.name, svc.version, svc.state
+                out, "  {}/{} {} {} [{}]",
+                s.port, s.protocol, s.name, s.version, s.state,
             );
         }
     }
-
     out
 }
 
 fn format_wifi(networks: &[proto::WifiNetwork]) -> String {
     let mut out = String::with_capacity(1024);
     let _ = writeln!(out, "{} WiFi networks", networks.len());
-    for wifi in networks {
+    for w in networks {
+        let snr = w.rssi - w.noise;
         let _ = writeln!(
-            out,
-            "  {} | {} | ch{} {} | rssi={} noise={} | {}",
-            wifi.ssid, wifi.bssid, wifi.channel, wifi.band, wifi.rssi, wifi.noise, wifi.security
+            out, "  {:32} ch{:<3} {:5} rssi={:<4} snr={:<3} {}",
+            w.ssid, w.channel, w.band, w.rssi, snr, w.security,
         );
     }
     out
@@ -408,19 +354,11 @@ fn format_wifi(networks: &[proto::WifiNetwork]) -> String {
 fn format_interfaces(interfaces: &[proto::NetworkInterface]) -> String {
     let mut out = String::with_capacity(512);
     let _ = writeln!(out, "{} interfaces", interfaces.len());
-    for iface in interfaces {
-        let status = if iface.is_up { "UP" } else { "DOWN" };
+    for i in interfaces {
+        let status = if i.is_up { "UP" } else { "DOWN" };
         let _ = writeln!(
-            out,
-            "  {} [{}] {} {} ipv4={:?} ipv6={:?} gw={} dns={:?}",
-            iface.name,
-            iface.kind,
-            status,
-            iface.mac,
-            iface.ipv4,
-            iface.ipv6,
-            iface.gateway,
-            iface.dns,
+            out, "  {} [{}] {status} ipv4={:?} gw={} dns={:?}",
+            i.name, i.kind, i.ipv4, i.gateway, i.dns,
         );
     }
     out
@@ -429,7 +367,14 @@ fn format_interfaces(interfaces: &[proto::NetworkInterface]) -> String {
 // ── Entry point ────────────────────────────────────────────────────────────
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let server = AmimoriMcp::new().serve(stdio()).await?;
+    let grpc_url = std::env::var("AMIMORI_GRPC_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
+
+    // Connect once — the channel is cheap to clone and multiplexes over HTTP/2.
+    let channel = tonic::transport::Endpoint::from_shared(grpc_url)?
+        .connect_lazy();
+
+    let server = AmimoriMcp::new(channel).serve(stdio()).await?;
     server.waiting().await?;
     Ok(())
 }

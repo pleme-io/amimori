@@ -105,13 +105,43 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // Index on services.host_mac for join performance
+        // Indexes for query performance
         manager
             .create_index(
                 Index::create()
                     .name("idx_services_host_mac")
                     .table(Services::Table)
                     .col(Services::HostMac)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_hosts_interface")
+                    .table(Hosts::Table)
+                    .col(Hosts::Interface)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_hosts_last_seen")
+                    .table(Hosts::Table)
+                    .col(Hosts::LastSeen)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_wifi_interface")
+                    .table(WifiNetworks::Table)
+                    .col(WifiNetworks::Interface)
                     .to_owned(),
             )
             .await?;

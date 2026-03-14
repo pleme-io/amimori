@@ -44,6 +44,7 @@ dependencies = [
  "clap",
  "dashmap",
  "dirs",
+ "futures",
  "kaname",
  "mac_oui",
  "network-interface",
@@ -52,6 +53,7 @@ dependencies = [
  "objc2-foundation",
  "prost",
  "prost-types",
+ "quick-xml",
  "rmcp",
  "schemars",
  "sea-orm",
@@ -59,9 +61,9 @@ dependencies = [
  "sea-query",
  "serde",
  "serde_json",
- "serde_yaml",
  "shellexpand",
  "shikumi",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2201,6 +2203,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.37.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3618,6 +3630,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3627,12 +3649,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]

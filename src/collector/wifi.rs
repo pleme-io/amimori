@@ -1,6 +1,4 @@
 //! WiFi network scanner using CoreWLAN (macOS only).
-//!
-//! Uses `objc2-core-wlan` for safe Objective-C interop.
 
 use std::time::Duration;
 
@@ -12,12 +10,14 @@ use crate::model::WifiInfo;
 
 pub struct WifiCollector {
     interval: Duration,
+    max_failures: u32,
 }
 
 impl WifiCollector {
     pub fn new(config: &Config) -> Self {
         Self {
-            interval: Duration::from_secs(config.wifi_interval),
+            interval: Duration::from_secs(config.collectors.wifi.interval),
+            max_failures: config.collectors.wifi.max_failures,
         }
     }
 }
@@ -32,10 +32,13 @@ impl Collector for WifiCollector {
         self.interval
     }
 
+    fn max_failures(&self) -> u32 {
+        self.max_failures
+    }
+
     async fn collect(&self) -> anyhow::Result<CollectorOutput> {
-        // CoreWLAN must be called from a thread with an active run loop.
         let networks = tokio::task::spawn_blocking(scan_wifi).await??;
-        tracing::debug!("wifi: found {} networks", networks.len());
+        tracing::debug!(count = networks.len(), "wifi scan complete");
         Ok(CollectorOutput::Wifi(networks))
     }
 }
@@ -50,25 +53,19 @@ fn scan_wifi() -> anyhow::Result<Vec<WifiInfo>> {
         .map(|s| s.to_string())
         .unwrap_or_else(|| "en0".to_string());
 
-    // Scan for available networks
-    let networks = unsafe { iface.scanForNetworksWithName_error(None) };
-
-    let networks = match networks {
+    let networks = match unsafe { iface.scanForNetworksWithName_error(None) } {
         Ok(nets) => nets,
         Err(e) => {
-            tracing::warn!("wifi scan failed: {e}");
-            return Ok(Vec::new());
+            anyhow::bail!("CoreWLAN scan failed: {e}");
         }
     };
 
     let mut results = Vec::new();
-
     for network in &*networks {
-        let info = extract_network_info(&network, &iface_name);
-        results.push(info);
+        results.push(extract_network_info(&network, &iface_name));
     }
 
-    // Also capture the currently connected network info
+    // Enrich with connected network's live RSSI/noise
     if let Some(connected) = connected_network_info(&iface, &iface_name) {
         if let Some(existing) = results.iter_mut().find(|w| w.bssid == connected.bssid) {
             existing.rssi = connected.rssi;
@@ -85,16 +82,13 @@ fn extract_network_info(network: &CWNetwork, iface_name: &str) -> WifiInfo {
     let ssid = unsafe { network.ssid() }
         .map(|s| s.to_string())
         .unwrap_or_default();
-
     let bssid = unsafe { network.bssid() }
         .map(|s| s.to_string())
         .unwrap_or_default();
-
     let rssi = unsafe { network.rssiValue() } as i32;
     let noise = unsafe { network.noiseMeasurement() } as i32;
 
-    let channel_obj = unsafe { network.wlanChannel() };
-    let (channel, band) = channel_obj
+    let (channel, band) = unsafe { network.wlanChannel() }
         .map(|ch| {
             let num = unsafe { ch.channelNumber() } as u32;
             let band = match unsafe { ch.channelBand() } {
@@ -107,9 +101,7 @@ fn extract_network_info(network: &CWNetwork, iface_name: &str) -> WifiInfo {
         })
         .unwrap_or((0, String::new()));
 
-    // CWNetwork doesn't expose securityType() directly.
-    // Use supportsSecurity() to detect the security type.
-    let security = detect_network_security(network);
+    let security = detect_security(network);
 
     WifiInfo {
         ssid,
@@ -123,11 +115,9 @@ fn extract_network_info(network: &CWNetwork, iface_name: &str) -> WifiInfo {
     }
 }
 
-/// Detect security type by probing supportsSecurity() for each type.
-/// Returns the highest-grade security supported.
-fn detect_network_security(network: &CWNetwork) -> String {
-    // Check from most secure to least secure
-    let checks = [
+/// Probe `supportsSecurity()` from most to least secure.
+fn detect_security(network: &CWNetwork) -> String {
+    const CHECKS: &[(CWSecurity, &str)] = &[
         (CWSecurity::WPA3Enterprise, "WPA3 Enterprise"),
         (CWSecurity::WPA3Personal, "WPA3 Personal"),
         (CWSecurity::WPA3Transition, "WPA3 Transition"),
@@ -143,12 +133,11 @@ fn detect_network_security(network: &CWNetwork) -> String {
         (CWSecurity::WEP, "WEP"),
     ];
 
-    for (security_type, name) in &checks {
-        if unsafe { network.supportsSecurity(*security_type) } {
-            return (*name).to_string();
+    for &(sec, name) in CHECKS {
+        if unsafe { network.supportsSecurity(sec) } {
+            return name.to_string();
         }
     }
-
     "Open".to_string()
 }
 
@@ -158,8 +147,7 @@ fn connected_network_info(iface: &CWInterface, iface_name: &str) -> Option<WifiI
     let rssi = unsafe { iface.rssiValue() } as i32;
     let noise = unsafe { iface.noiseMeasurement() } as i32;
 
-    let channel_obj = unsafe { iface.wlanChannel() };
-    let (channel, band) = channel_obj
+    let (channel, band) = unsafe { iface.wlanChannel() }
         .map(|ch| {
             let num = unsafe { ch.channelNumber() } as u32;
             let band = match unsafe { ch.channelBand() } {
@@ -172,7 +160,7 @@ fn connected_network_info(iface: &CWInterface, iface_name: &str) -> Option<WifiI
         })
         .unwrap_or((0, String::new()));
 
-    let security = format_interface_security(unsafe { iface.security() });
+    let security = format_iface_security(unsafe { iface.security() });
 
     Some(WifiInfo {
         ssid,
@@ -186,8 +174,8 @@ fn connected_network_info(iface: &CWInterface, iface_name: &str) -> Option<WifiI
     })
 }
 
-fn format_interface_security(security: CWSecurity) -> String {
-    match security {
+fn format_iface_security(sec: CWSecurity) -> String {
+    match sec {
         CWSecurity::None => "Open",
         CWSecurity::WEP => "WEP",
         CWSecurity::WPAPersonal => "WPA Personal",

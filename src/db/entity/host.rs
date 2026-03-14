@@ -11,6 +11,7 @@ pub struct Model {
     pub hostname: Option<String>,
     pub os_hint: Option<String>,
     pub interface: String,
+    pub network_id: String,
     pub first_seen: ChronoDateTimeUtc,
     pub last_seen: ChronoDateTimeUtc,
 }

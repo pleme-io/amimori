@@ -1,108 +1,143 @@
 # amimori (網守) — Continuous Network Profiler
 
-Persistent macOS service that continuously profiles all attached networks
+Persistent macOS/Linux service that continuously profiles all attached networks
 (WiFi + Ethernet), tracks deltas efficiently, and exposes state via gRPC
 (streaming) and MCP (for Claude/agents).
 
 ## Architecture
 
 ```
-Collectors (interval-based)        State Engine            Servers
-┌──────────────┐                  ┌─────────────┐       ┌──────────┐
-│ ArpCollector  │─(5s)──────────▶│ DashMap     │◀─────▶│ gRPC     │
-│ IfaceCollector│─(5s)──────────▶│ + Delta Log │       │ :50051   │
-│ WifiCollector │─(15s, macOS)──▶│ + SQLite    │       ├──────────┤
-│ NmapCollector │─(60s)─────────▶│             │       │ MCP      │
-└──────────────┘                  └─────────────┘       │ (stdio)  │
-                                                         └──────────┘
+Collectors (configurable intervals)   State Engine             Servers
+┌──────────────────────────────┐     ┌──────────────────┐    ┌──────────┐
+│ ArpCollector     (5s)        │────▶│ DashMap state     │◀──▶│ gRPC     │
+│ InterfaceCollector (5s)      │────▶│ Delta ring buffer │    │ (config) │
+│ WifiCollector    (15s, macOS)│────▶│ SQLite (SeaORM)   │    ├──────────┤
+│ NmapCollector    (60s, opt)  │────▶│ OUI vendor lookup │    │ MCP      │
+└──────────────────────────────┘     │ Filter engine     │    │ (stdio)  │
+  ↑ auto-disable on max_failures    │ Stale host pruner │    └──────────┘
+  ↑ configurable per-collector       └──────────────────┘
 ```
 
 ## Modes
 
-- **daemon** — persistent service with collectors + gRPC server + SQLite
-- **mcp** — MCP server (default when no args), queries daemon via gRPC
-- **scan** — one-shot scan, prints JSON to stdout
-- **status** — check if daemon is running via gRPC health check
+| Mode | Description |
+|------|-------------|
+| `daemon` | Persistent service: collectors + gRPC + SQLite + pruner |
+| `mcp` | MCP server (default), queries daemon via gRPC |
+| `scan` | One-shot scan, JSON to stdout |
+| `status` | Query daemon health via gRPC |
 
-## Key Design Decisions
+## Configuration
 
-1. No tsunagu — launchd handles lifecycle (KeepAlive/RunAtLoad)
-2. No passive BPF in MVP — `arp -a` polling (no root needed)
-3. CoreWLAN for WiFi — `objc2-core-wlan`, macOS-only behind `#[cfg]`
-4. nmap via shell-out — `tokio::process::Command`
-5. gRPC streaming — tonic server-side streaming for Subscribe
-6. SQLite via SeaORM — full Sea stack (entities, migrations, query builder)
-
-## Dependencies
-
-- **shikumi** — config discovery, hot-reload, env override
-- **kaname** — MCP server framework (rmcp 0.15)
-- **sea-orm** — SQLite ORM with migrations
-- **tonic/prost** — gRPC server + proto codegen
-- **dashmap** — concurrent in-memory state
-- **network-interface** — interface enumeration (no root)
-- **objc2-core-wlan** — WiFi scanning (macOS only)
-- **mac_oui** — MAC address vendor lookup
-
-## Config
+Nested YAML config via shikumi. Every aspect is configurable:
 
 ```yaml
 # ~/.config/amimori/amimori.yaml
-interfaces: [en0, en4]
-grpc_port: 50051
-arp_interval: 5
-interface_interval: 5
-wifi_interval: 15
-scan_interval: 60
-db_path: ~/.local/share/amimori/state.db
-event_buffer_size: 10000
-nmap:
-  enable: true
-  bin: nmap
-  service_detection: false
+interfaces: [en0, en4]  # empty = auto-detect all non-loopback
+
+grpc:
+  address: "127.0.0.1"
+  port: 50051
+
+collectors:
+  arp:
+    enable: true
+    interval: 5          # seconds
+    max_failures: 10     # auto-disable after N consecutive failures
+  interface:
+    enable: true
+    interval: 5
+    max_failures: 10
+  wifi:
+    enable: true
+    interval: 15
+    max_failures: 10
+  nmap:
+    enable: true
+    interval: 60
+    bin: nmap
+    timeout: 120         # kill nmap after this many seconds
+    service_detection: false
+    subnets: []          # empty = auto-derive from active interfaces
+    max_failures: 3
+
+storage:
+  db_path: ~/.local/share/amimori/state.db
+  event_buffer_size: 10000
+  retention:
+    host_ttl: 86400      # prune hosts not seen for 24h (0 = keep forever)
+    prune_interval: 300  # run pruner every 5 min
+
+filters:
+  exclude_macs: []         # MAC addresses to never track
+  exclude_ips: []          # IPs to never track
+  exclude_interfaces: []   # interfaces to ignore
+  include_vendors: []      # if non-empty, only track these vendors
+
+logging:
+  level: info              # trace, debug, info, warn, error
+  format: text             # text or json
 ```
+
+Environment variables override config: `AMIMORI_GRPC__PORT=50052`, `AMIMORI_CONFIG=/path`.
+
+## Key Design
+
+- **Per-collector lifecycle**: Each collector tracks consecutive failures and auto-disables after `max_failures`. Recovery resets the counter.
+- **Filter engine**: MAC/IP/interface exclusion + vendor inclusion applied at the state engine level, before persistence.
+- **Stale host pruning**: Background task removes hosts not seen within `host_ttl`.
+- **Subnet auto-discovery**: nmap derives CIDRs from active interface addresses instead of hardcoded subnets.
+- **nmap timeout**: `tokio::time::timeout` kills hung scans.
+- **nmap capability detection**: Checks `nmap --version` at startup; disables scanner if not found.
+- **Robust XML parsing**: `quick-xml` for nmap output instead of hand-rolled string ops.
+- **Structured logging**: JSON format option for log aggregation.
+
+## Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| shikumi | Config discovery, hot-reload, env override |
+| kaname/rmcp | MCP server framework |
+| sea-orm | SQLite ORM with migrations |
+| tonic/prost | gRPC server + proto codegen |
+| dashmap | Concurrent in-memory state |
+| quick-xml | Robust nmap XML parsing |
+| network-interface | Interface enumeration |
+| objc2-core-wlan | WiFi scanning (macOS) |
+| mac_oui | MAC vendor lookup |
+| thiserror | Error types |
 
 ## MCP Tools (7)
 
 | Tool | Description |
 |------|-------------|
-| network_snapshot | Full snapshot of all profiled networks |
-| network_hosts | List discovered hosts with filters |
-| network_changes | Recent network change events |
-| network_host_detail | Detailed host info by MAC or IP |
-| wifi_networks | Visible WiFi networks |
-| network_interfaces | All monitored interfaces with status |
-| network_stats | Profiler health and statistics |
-
-## Building
-
-```bash
-cargo build                    # debug build
-cargo run -- scan              # one-shot scan
-cargo run -- daemon --config amimori.yaml
-cargo run -- status            # check daemon
-nix build                     # via substrate
-```
+| `network_snapshot` | Full snapshot — interfaces, hosts, WiFi |
+| `network_hosts` | List hosts with interface/vendor/port filters |
+| `network_changes` | Recent delta events |
+| `network_host_detail` | Detailed host info by MAC or IP |
+| `wifi_networks` | Visible WiFi sorted by signal, with security/RSSI filter |
+| `network_interfaces` | All interfaces with IP, gateway, DNS, status |
+| `network_stats` | Daemon health and statistics |
 
 ## File Structure
 
 ```
 src/
-├── main.rs              # clap dispatch: daemon | mcp | scan | status
-├── config.rs            # shikumi YAML config
-├── daemon.rs            # orchestrate collectors + gRPC server
-├── state.rs             # DashMap + event log + delta engine
+├── main.rs              # clap: daemon | mcp | scan | status
+├── config.rs            # nested config with validation
+├── daemon.rs            # orchestrate collectors + gRPC + pruner
+├── state.rs             # DashMap + delta engine + filters + pruning
+├── model.rs             # domain types, MAC utils, serde
 ├── db/
-│   ├── mod.rs           # SeaORM database layer
-│   ├── entity/          # SeaORM entities (host, service, interface, wifi)
-│   └── migration/       # SeaORM migrations
-├── model.rs             # Core types: Host, Service, WiFi, Interface, Delta
+│   ├── mod.rs           # SeaORM CRUD layer
+│   ├── entity/          # host, service, interface, wifi entities
+│   └── migration/       # schema migrations
 ├── collector/
-│   ├── mod.rs           # Collector trait + scheduler
-│   ├── arp.rs           # parse `arp -a`
+│   ├── mod.rs           # trait + scheduler with failure tracking
+│   ├── arp.rs           # parse arp -a
 │   ├── interface.rs     # network-interface + netstat + scutil
-│   ├── wifi.rs          # CoreWLAN (macOS only)
-│   └── scanner.rs       # nmap shell-out
-├── grpc.rs              # tonic server + proto types
-└── mcp.rs               # rmcp MCP server (7 tools)
+│   ├── wifi.rs          # CoreWLAN (macOS, #[cfg])
+│   └── scanner.rs       # nmap with quick-xml, timeout, auto-subnets
+├── grpc.rs              # tonic server, configurable bind
+└── mcp.rs               # 7 MCP tools via rmcp
 ```
