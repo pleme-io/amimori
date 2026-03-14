@@ -29,6 +29,11 @@ sea-orm-migration = { version = "1", features = ["sqlx-sqlite", "runtime-tokio-r
 sea-query = "0.32"
 dashmap = "6"
 
+# TLS certificate analysis
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+webpki-roots = "1"
+
 # XML parsing (nmap output)
 quick-xml = { version = "0.37", features = ["serialize"] }
 

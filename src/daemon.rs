@@ -128,13 +128,19 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     }
 
     // Banner grabber — enriches hosts with service banners after nmap discovers ports.
-    // Always enabled when nmap is enabled (no separate config — it reads existing state).
     if config.collectors.nmap.enable && config.collectors.nmap.service_detection {
         actors.push((
             Box::new(collector::banner::BannerCollector::new(&config, Arc::clone(&engine))),
             ActorConfig::interval_only(),
         ));
         tracing::info!("banner grabber enabled");
+
+        // TLS certificate collector — extracts certs from TLS-capable ports.
+        actors.push((
+            Box::new(collector::tls::TlsCollector::new(&config, Arc::clone(&engine))),
+            ActorConfig::interval_only(),
+        ));
+        tracing::info!("TLS certificate collector enabled");
     }
 
     if actors.is_empty() {
