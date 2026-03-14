@@ -596,6 +596,40 @@ impl StateEngine {
         Ok(())
     }
 
+    pub async fn apply_banners(
+        &self,
+        results: &[crate::collector::banner::BannerResult],
+    ) -> anyhow::Result<()> {
+        for result in results {
+            if let Some(mut host) = self.state.hosts.get_mut(&result.mac) {
+                let mut changed = false;
+
+                // Update the banner on the matching service
+                if let Some(svc) = host.services.iter_mut().find(|s| {
+                    s.port == result.port && s.protocol == result.protocol
+                }) {
+                    if svc.banner.is_empty() && !result.banner.is_empty() {
+                        svc.banner = result.banner.clone();
+                        changed = true;
+                    }
+                }
+
+                // Merge fingerprints extracted from the banner
+                for fp in &result.fingerprints {
+                    changed |= host.merge_fingerprint(fp.clone());
+                }
+
+                if changed {
+                    let snapshot = host.clone();
+                    drop(host);
+                    self.emit(Change::HostUpdated(snapshot.clone())).await;
+                    self.db.upsert_host(&snapshot).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ── Pruning ────────────────────────────────────────────────────────
 
     pub async fn prune_stale_hosts(&self, ttl_secs: u64) -> anyhow::Result<usize> {

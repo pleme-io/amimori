@@ -1,4 +1,5 @@
 pub mod arp;
+pub mod banner;
 pub mod interface;
 pub mod scanner;
 #[cfg(target_os = "macos")]
@@ -14,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::event_bus::{TriggerEvent, TriggerKind};
 use crate::model::{ArpEntry, InterfaceInfo, NmapHost, WifiInfo};
+use crate::collector::banner::BannerResult;
 use crate::state::StateEngine;
 
 /// Output produced by a collector.
@@ -25,6 +27,7 @@ pub enum CollectorOutput {
         interface: String,
         hosts: Vec<NmapHost>,
     },
+    Banners(Vec<BannerResult>),
 }
 
 /// Trait for data collectors. Pure collection logic — no scheduling.
@@ -296,6 +299,7 @@ async fn apply_output(engine: &StateEngine, output: CollectorOutput) -> anyhow::
         CollectorOutput::Nmap { interface, hosts } => {
             engine.apply_nmap_results(&interface, &hosts).await
         }
+        CollectorOutput::Banners(results) => engine.apply_banners(&results).await,
     }
 }
 

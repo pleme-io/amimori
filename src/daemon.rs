@@ -127,6 +127,16 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         }
     }
 
+    // Banner grabber — enriches hosts with service banners after nmap discovers ports.
+    // Always enabled when nmap is enabled (no separate config — it reads existing state).
+    if config.collectors.nmap.enable && config.collectors.nmap.service_detection {
+        actors.push((
+            Box::new(collector::banner::BannerCollector::new(&config, Arc::clone(&engine))),
+            ActorConfig::interval_only(),
+        ));
+        tracing::info!("banner grabber enabled");
+    }
+
     if actors.is_empty() {
         anyhow::bail!(
             "no collector actors could be initialized — check config and tool availability"
