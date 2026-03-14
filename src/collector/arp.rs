@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::collector::{Collector, CollectorOutput};
 use crate::config::Config;
-use crate::model::{ArpEntry, is_valid_mac, normalize_mac};
+use crate::model::{ArpEntry, normalize_mac};
 
 /// Parses `arp -a` output for each monitored interface. No root required.
 pub struct ArpCollector {
@@ -87,9 +87,9 @@ pub fn parse_arp_output(output: &str, monitored: &[String]) -> Vec<ArpEntry> {
         let after_at = &after_paren[at_pos + 4..];
         let raw_mac = after_at.split_whitespace().next().unwrap_or("");
 
-        if !is_valid_mac(raw_mac) {
+        let Some(mac) = normalize_mac(raw_mac) else {
             continue;
-        }
+        };
 
         // Extract interface after " on "
         let interface = after_at
@@ -112,7 +112,7 @@ pub fn parse_arp_output(output: &str, monitored: &[String]) -> Vec<ArpEntry> {
 
         entries.push(ArpEntry {
             ip,
-            mac: normalize_mac(raw_mac),
+            mac,
             interface: interface.to_string(),
             hostname,
         });

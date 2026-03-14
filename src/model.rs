@@ -253,10 +253,21 @@ pub struct NmapHost {
 
 /// Normalize a MAC/BSSID to lowercase colon-separated format with zero-padded octets.
 ///
-/// Examples: `"a:B:c:D:e:F"` → `"0a:0b:0c:0d:0e:0f"`
-pub fn normalize_mac(mac: &str) -> String {
+/// Returns `None` if the input isn't a valid MAC (wrong octet count, non-hex chars,
+/// or empty octets). This prevents garbage MACs from silently entering the system.
+///
+/// Examples: `"a:B:c:D:e:F"` → `Some("0a:0b:0c:0d:0e:0f")`
+pub fn normalize_mac(mac: &str) -> Option<String> {
+    let octets: Vec<&str> = mac.split(':').collect();
+    if octets.len() != 6 {
+        return None;
+    }
+
     let mut out = String::with_capacity(17);
-    for (i, octet) in mac.split(':').enumerate() {
+    for (i, octet) in octets.iter().enumerate() {
+        if octet.is_empty() || octet.len() > 2 || !octet.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
         if i > 0 {
             out.push(':');
         }
@@ -267,13 +278,13 @@ pub fn normalize_mac(mac: &str) -> String {
             out.push(c.to_ascii_lowercase());
         }
     }
-    out
+    Some(out)
 }
 
-/// Validate that a string looks like a MAC address (at least 5 colons, 17 chars normalized).
+/// Validate that a string looks like a MAC address.
+#[cfg(test)]
 pub fn is_valid_mac(mac: &str) -> bool {
-    let parts: Vec<&str> = mac.split(':').collect();
-    parts.len() == 6 && parts.iter().all(|p| p.len() <= 2 && !p.is_empty())
+    normalize_mac(mac).is_some()
 }
 
 #[cfg(test)]
@@ -282,14 +293,17 @@ mod tests {
 
     #[test]
     fn normalize_mac_single_digit() {
-        assert_eq!(normalize_mac("a:b:c:d:e:f"), "0a:0b:0c:0d:0e:0f");
+        assert_eq!(
+            normalize_mac("a:b:c:d:e:f").as_deref(),
+            Some("0a:0b:0c:0d:0e:0f")
+        );
     }
 
     #[test]
     fn normalize_mac_full() {
         assert_eq!(
-            normalize_mac("AA:BB:CC:DD:EE:FF"),
-            "aa:bb:cc:dd:ee:ff"
+            normalize_mac("AA:BB:CC:DD:EE:FF").as_deref(),
+            Some("aa:bb:cc:dd:ee:ff")
         );
     }
 
@@ -326,15 +340,36 @@ mod tests {
     }
 
     #[test]
-    fn normalize_mac_handles_non_hex_gracefully() {
-        // normalize_mac doesn't validate, just lowercases and pads
-        let result = normalize_mac("zz:yy:xx:ww:vv:uu");
-        assert_eq!(result, "zz:yy:xx:ww:vv:uu");
+    fn normalize_mac_rejects_non_hex() {
+        assert!(normalize_mac("zz:yy:xx:ww:vv:uu").is_none());
+    }
+
+    #[test]
+    fn normalize_mac_rejects_too_few_octets() {
+        assert!(normalize_mac("aa:bb:cc:dd:ee").is_none());
+    }
+
+    #[test]
+    fn normalize_mac_rejects_too_many_octets() {
+        assert!(normalize_mac("aa:bb:cc:dd:ee:ff:00").is_none());
+    }
+
+    #[test]
+    fn normalize_mac_rejects_empty_octet() {
+        assert!(normalize_mac("aa::cc:dd:ee:ff").is_none());
+    }
+
+    #[test]
+    fn normalize_mac_rejects_triple_digit_octet() {
+        assert!(normalize_mac("aaa:bb:cc:dd:ee:ff").is_none());
     }
 
     #[test]
     fn normalize_mac_mixed_case() {
-        assert_eq!(normalize_mac("aA:Bb:cC:Dd:eE:fF"), "aa:bb:cc:dd:ee:ff");
+        assert_eq!(
+            normalize_mac("aA:Bb:cC:Dd:eE:fF").as_deref(),
+            Some("aa:bb:cc:dd:ee:ff")
+        );
     }
 
     // ── InterfaceInfo::cidr() ──────────────────────────────────────────

@@ -17,8 +17,9 @@ pub mod proto {
 
 use proto::network_profiler_server::{NetworkProfiler, NetworkProfilerServer};
 use proto::{
-    DeltaUpdate, Empty, Host, HostRequest, InterfaceList, NetworkInterface, NetworkSnapshot,
-    Service, ServiceChange, SnapshotRequest, SubscribeRequest, WifiNetwork, WifiNetworkList,
+    ChangesRequest, ChangesResponse, DeltaUpdate, Empty, Host, HostRequest, InterfaceList,
+    NetworkInterface, NetworkSnapshot, Service, ServiceChange, SnapshotRequest, SubscribeRequest,
+    WifiNetwork, WifiNetworkList,
 };
 
 struct ProfilerService {
@@ -44,6 +45,23 @@ impl NetworkProfiler for ProfilerService {
             &self.engine,
             filter.as_deref(),
         )))
+    }
+
+    async fn get_changes(
+        &self,
+        request: Request<ChangesRequest>,
+    ) -> Result<Response<ChangesResponse>, Status> {
+        let req = request.into_inner();
+        let limit = if req.limit == 0 { 50 } else { req.limit.min(500) } as usize;
+
+        let all = self.engine.events_since(req.since_sequence).await;
+        let events: Vec<DeltaUpdate> = all.iter().take(limit).map(delta_to_proto).collect();
+        let seq = self.engine.state.sequence.load(std::sync::atomic::Ordering::Relaxed);
+
+        Ok(Response::new(ChangesResponse {
+            events,
+            current_sequence: seq,
+        }))
     }
 
     type SubscribeStream = Pin<Box<dyn Stream<Item = Result<DeltaUpdate, Status>> + Send>>;
@@ -254,13 +272,17 @@ fn delta_to_proto(event: &DeltaEvent) -> DeltaUpdate {
         Change::InterfaceChanged(i) => {
             proto::delta_update::Change::InterfaceChanged(iface_to_proto(i))
         }
-        Change::NetworkChanged { interface, .. } => {
-            // Map network transitions to interface change in proto
-            proto::delta_update::Change::InterfaceChanged(NetworkInterface {
-                name: interface.clone(),
-                ..Default::default()
-            })
-        }
+        Change::NetworkChanged {
+            interface,
+            old_network_id,
+            new_network_id,
+            hosts_cleared,
+        } => proto::delta_update::Change::NetworkChanged(proto::NetworkChange {
+            interface: interface.clone(),
+            old_network_id: old_network_id.clone(),
+            new_network_id: new_network_id.clone(),
+            hosts_cleared: *hosts_cleared as u32,
+        })
     };
 
     DeltaUpdate {
@@ -597,11 +619,13 @@ mod tests {
             },
         };
         let p = delta_to_proto(&event);
-        // NetworkChanged maps to InterfaceChanged in proto
-        if let Some(proto::delta_update::Change::InterfaceChanged(i)) = p.change {
-            assert_eq!(i.name, "en0");
+        if let Some(proto::delta_update::Change::NetworkChanged(nc)) = p.change {
+            assert_eq!(nc.interface, "en0");
+            assert_eq!(nc.old_network_id, "10.0.0.1|255.255.255.0");
+            assert_eq!(nc.new_network_id, "192.168.1.1|255.255.255.0");
+            assert_eq!(nc.hosts_cleared, 5);
         } else {
-            panic!("expected InterfaceChanged for NetworkChanged");
+            panic!("expected NetworkChanged");
         }
     }
 

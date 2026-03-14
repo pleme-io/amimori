@@ -136,28 +136,17 @@ impl AmimoriMcp {
     async fn network_changes(&self, Parameters(input): Parameters<ChangesInput>) -> String {
         let mut client = self.client();
 
+        let limit = input.limit.unwrap_or(50).min(500);
         match client
-            .get_snapshot(proto::SnapshotRequest::default())
+            .get_changes(proto::ChangesRequest {
+                since_sequence: input.since_sequence.unwrap_or(0),
+                limit: limit as u32,
+            })
             .await
         {
             Ok(resp) => {
-                let snapshot = resp.into_inner();
-                let limit = input.limit.unwrap_or(50).min(500);
-                let mut out = String::new();
-                let _ = writeln!(out, "Current sequence: {}", snapshot.sequence);
-                let _ = writeln!(
-                    out,
-                    "State: {} hosts, {} interfaces, {} wifi networks",
-                    snapshot.hosts.len(),
-                    snapshot.interfaces.len(),
-                    snapshot.wifi_networks.len(),
-                );
-                let _ = writeln!(
-                    out,
-                    "\nUse gRPC Subscribe RPC for streaming deltas (since_sequence={}, limit={limit})",
-                    input.since_sequence.unwrap_or(0)
-                );
-                out
+                let resp = resp.into_inner();
+                format_changes(&resp.events, resp.current_sequence)
             }
             Err(e) => format!("error: {e}"),
         }
@@ -351,6 +340,59 @@ fn format_wifi(networks: &[proto::WifiNetwork]) -> String {
     out
 }
 
+fn format_changes(events: &[proto::DeltaUpdate], current_seq: u64) -> String {
+    if events.is_empty() {
+        return format!("No changes (current sequence: {current_seq})");
+    }
+
+    let mut out = String::with_capacity(2048);
+    let _ = writeln!(out, "{} events (sequence: {current_seq})\n", events.len());
+
+    for e in events {
+        let desc = match &e.change {
+            Some(proto::delta_update::Change::HostAdded(h)) => {
+                let name = if h.hostname.is_empty() { &h.vendor } else { &h.hostname };
+                format!("+ host {} ({}) {:?}", h.mac, name, h.ipv4)
+            }
+            Some(proto::delta_update::Change::HostRemoved(h)) => {
+                format!("- host {}", h.mac)
+            }
+            Some(proto::delta_update::Change::HostUpdated(h)) => {
+                let name = if h.hostname.is_empty() { &h.vendor } else { &h.hostname };
+                format!("~ host {} ({}) {:?}", h.mac, name, h.ipv4)
+            }
+            Some(proto::delta_update::Change::ServiceChanged(sc)) => {
+                let svc = sc.service.as_ref().map_or("?".into(), |s| {
+                    format!("{}/{} {}", s.port, s.protocol, s.name)
+                });
+                format!("  svc {} {} {}", sc.change_type, sc.host_mac, svc)
+            }
+            Some(proto::delta_update::Change::WifiAdded(w)) => {
+                format!("+ wifi {} (ch{} {})", w.ssid, w.channel, w.security)
+            }
+            Some(proto::delta_update::Change::WifiRemoved(w)) => {
+                format!("- wifi {}", w.bssid)
+            }
+            Some(proto::delta_update::Change::WifiUpdated(w)) => {
+                format!("~ wifi {} rssi={}", w.ssid, w.rssi)
+            }
+            Some(proto::delta_update::Change::InterfaceChanged(i)) => {
+                let status = if i.is_up { "UP" } else { "DOWN" };
+                format!("~ iface {} {status} {:?}", i.name, i.ipv4)
+            }
+            Some(proto::delta_update::Change::NetworkChanged(nc)) => {
+                format!(
+                    "! network {} → {} on {} (cleared {} hosts)",
+                    nc.old_network_id, nc.new_network_id, nc.interface, nc.hosts_cleared
+                )
+            }
+            None => "? unknown event".into(),
+        };
+        let _ = writeln!(out, "  [{:>6}] {desc}", e.sequence);
+    }
+    out
+}
+
 fn format_interfaces(interfaces: &[proto::NetworkInterface]) -> String {
     let mut out = String::with_capacity(512);
     let _ = writeln!(out, "{} interfaces", interfaces.len());
@@ -533,6 +575,98 @@ mod tests {
         assert!(out.contains("2 interfaces"));
         assert!(out.contains("en0") && out.contains("UP"));
         assert!(out.contains("en4") && out.contains("DOWN"));
+    }
+
+    // ── format_changes ────────────────────────────────────────────────
+
+    #[test]
+    fn format_changes_empty() {
+        let out = format_changes(&[], 42);
+        assert!(out.contains("No changes"));
+        assert!(out.contains("42"));
+    }
+
+    #[test]
+    fn format_changes_host_added() {
+        let events = vec![proto::DeltaUpdate {
+            sequence: 1,
+            timestamp: None,
+            change: Some(proto::delta_update::Change::HostAdded(proto_host())),
+        }];
+        let out = format_changes(&events, 1);
+        assert!(out.contains("1 events"));
+        assert!(out.contains("+ host"));
+        assert!(out.contains("aa:bb:cc:dd:ee:ff"));
+        assert!(out.contains("macbook")); // hostname shown
+    }
+
+    #[test]
+    fn format_changes_host_removed() {
+        let events = vec![proto::DeltaUpdate {
+            sequence: 2,
+            timestamp: None,
+            change: Some(proto::delta_update::Change::HostRemoved(proto::Host {
+                mac: "aa:bb:cc:dd:ee:ff".into(),
+                ..Default::default()
+            })),
+        }];
+        let out = format_changes(&events, 2);
+        assert!(out.contains("- host"));
+    }
+
+    #[test]
+    fn format_changes_wifi_added() {
+        let events = vec![proto::DeltaUpdate {
+            sequence: 3,
+            timestamp: None,
+            change: Some(proto::delta_update::Change::WifiAdded(proto_wifi())),
+        }];
+        let out = format_changes(&events, 3);
+        assert!(out.contains("+ wifi"));
+        assert!(out.contains("HomeNet"));
+    }
+
+    #[test]
+    fn format_changes_network_changed() {
+        let events = vec![proto::DeltaUpdate {
+            sequence: 4,
+            timestamp: None,
+            change: Some(proto::delta_update::Change::NetworkChanged(
+                proto::NetworkChange {
+                    interface: "en0".into(),
+                    old_network_id: "10.0.0.1|/24".into(),
+                    new_network_id: "192.168.1.1|/24".into(),
+                    hosts_cleared: 12,
+                },
+            )),
+        }];
+        let out = format_changes(&events, 4);
+        assert!(out.contains("! network"));
+        assert!(out.contains("cleared 12 hosts"));
+    }
+
+    #[test]
+    fn format_changes_service_changed() {
+        let events = vec![proto::DeltaUpdate {
+            sequence: 5,
+            timestamp: None,
+            change: Some(proto::delta_update::Change::ServiceChanged(
+                proto::ServiceChange {
+                    host_mac: "aa:bb:cc:dd:ee:ff".into(),
+                    service: Some(proto::Service {
+                        port: 443,
+                        protocol: "tcp".into(),
+                        name: "https".into(),
+                        version: String::new(),
+                        state: "open".into(),
+                    }),
+                    change_type: "added".into(),
+                },
+            )),
+        }];
+        let out = format_changes(&events, 5);
+        assert!(out.contains("svc added"));
+        assert!(out.contains("443/tcp https"));
     }
 }
 

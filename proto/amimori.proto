@@ -5,6 +5,7 @@ import "google/protobuf/timestamp.proto";
 
 service NetworkProfiler {
   rpc GetSnapshot(SnapshotRequest) returns (NetworkSnapshot);
+  rpc GetChanges(ChangesRequest) returns (ChangesResponse);
   rpc Subscribe(SubscribeRequest) returns (stream DeltaUpdate);
   rpc GetHost(HostRequest) returns (Host);
   rpc ListInterfaces(Empty) returns (InterfaceList);
@@ -20,6 +21,16 @@ message SnapshotRequest {
 message SubscribeRequest {
   uint64 since_sequence = 1;  // replay from this sequence (0 = snapshot + stream)
   string interface = 2;       // optional: filter
+}
+
+message ChangesRequest {
+  uint64 since_sequence = 1;  // return events after this sequence (0 = all buffered)
+  uint32 limit = 2;           // max events to return (0 = default 50, max 500)
+}
+
+message ChangesResponse {
+  repeated DeltaUpdate events = 1;
+  uint64 current_sequence = 2;
 }
 
 message HostRequest {
@@ -46,7 +57,15 @@ message DeltaUpdate {
     WifiNetwork wifi_removed = 8;
     WifiNetwork wifi_updated = 9;
     NetworkInterface interface_changed = 10;
+    NetworkChange network_changed = 11;
   }
+}
+
+message NetworkChange {
+  string interface = 1;
+  string old_network_id = 2;
+  string new_network_id = 3;
+  uint32 hosts_cleared = 4;
 }
 
 message NetworkInterface {

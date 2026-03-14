@@ -138,7 +138,9 @@ impl StateEngine {
         let now = Utc::now();
 
         for entry in entries {
-            let mac = normalize_mac(&entry.mac);
+            let Some(mac) = normalize_mac(&entry.mac) else {
+                continue;
+            };
 
             if self.filters.should_exclude_mac(&mac) || self.filters.should_exclude_ip(&entry.ip) {
                 continue;
@@ -400,7 +402,9 @@ impl StateEngine {
             let Some(raw_mac) = &nmap_host.mac else {
                 continue;
             };
-            let mac = normalize_mac(raw_mac);
+            let Some(mac) = normalize_mac(raw_mac) else {
+                continue;
+            };
 
             if self.filters.should_exclude_mac(&mac) {
                 continue;
