@@ -453,6 +453,71 @@ mod tests {
         assert!(score <= 1.0);
     }
 
+    #[test]
+    fn correlation_same_os_adds_score() {
+        let a = make_host("aa:bb:cc:dd:ee:ff", "10.0.0.1", None);
+        let b = make_host("00:11:22:33:44:55", "10.0.0.2", None);
+        // Both have os_hint = "Linux" from make_host
+        let score = correlation_score(&a, &b);
+        assert!(score >= 0.15, "same OS should add 0.15, got {score}");
+    }
+
+    #[test]
+    fn correlation_shared_ports() {
+        let mut a = make_host("aa:bb:cc:dd:ee:ff", "10.0.0.1", None);
+        let mut b = make_host("00:11:22:33:44:55", "10.0.0.2", None);
+        b.os_hint = Some("Windows".into());
+        b.vendor = "Other".into();
+
+        // Give both hosts port 22 and 80
+        for host in [&mut a, &mut b] {
+            host.services = vec![
+                ServiceInfo { port: 22, protocol: "tcp".into(), name: "ssh".into(),
+                    version: String::new(), state: "open".into(), banner: String::new() },
+                ServiceInfo { port: 80, protocol: "tcp".into(), name: "http".into(),
+                    version: String::new(), state: "open".into(), banner: String::new() },
+            ];
+        }
+        let score = correlation_score(&a, &b);
+        // Full port overlap (Jaccard=1.0) → +0.1, different OS/hostname/IP = no other factors
+        assert!(score >= 0.1, "shared ports should contribute, got {score}");
+    }
+
+    #[test]
+    fn correlation_empty_services_no_port_score() {
+        let a = make_host("aa:bb:cc:dd:ee:ff", "10.0.0.1", None);
+        let mut b = make_host("00:11:22:33:44:55", "10.0.0.2", None);
+        b.os_hint = Some("Windows".into());
+        b.vendor = "Other".into();
+        // a has no services, b has no services → no port contribution
+        let score = correlation_score(&a, &b);
+        assert!(score < 0.1, "empty services should contribute nothing, got {score}");
+    }
+
+    #[test]
+    fn correlation_partial_port_overlap() {
+        let mut a = make_host("aa:bb:cc:dd:ee:ff", "10.0.0.1", None);
+        let mut b = make_host("00:11:22:33:44:55", "10.0.0.2", None);
+        b.os_hint = Some("Windows".into());
+        b.vendor = "Other".into();
+
+        a.services = vec![
+            ServiceInfo { port: 22, protocol: "tcp".into(), name: "ssh".into(),
+                version: String::new(), state: "open".into(), banner: String::new() },
+            ServiceInfo { port: 80, protocol: "tcp".into(), name: "http".into(),
+                version: String::new(), state: "open".into(), banner: String::new() },
+        ];
+        b.services = vec![
+            ServiceInfo { port: 22, protocol: "tcp".into(), name: "ssh".into(),
+                version: String::new(), state: "open".into(), banner: String::new() },
+            ServiceInfo { port: 443, protocol: "tcp".into(), name: "https".into(),
+                version: String::new(), state: "open".into(), banner: String::new() },
+        ];
+        // Jaccard = 1 intersection / 3 union = 0.33 → 0.1 * 0.33 = 0.033
+        let score = correlation_score(&a, &b);
+        assert!(score > 0.0 && score < 0.15, "partial overlap score should be small, got {score}");
+    }
+
     // ── Classification tests ──────────────────────────────────────────
 
     #[test]

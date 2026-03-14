@@ -1774,4 +1774,187 @@ mod tests {
         engine.apply_nmap_results("en0", &[nmap]).await.unwrap();
         assert!(engine.state.hosts.is_empty());
     }
+
+    // ── apply_banners ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn apply_banners_updates_service_banner() {
+        let engine = make_engine(FilterConfig::default());
+        engine
+            .apply_arp_results(&[arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.1", "en0")])
+            .await
+            .unwrap();
+
+        // Add a service via nmap
+        let nmap = crate::model::NmapHost {
+            ip: "10.0.0.1".parse().unwrap(),
+            mac: Some("aa:bb:cc:dd:ee:ff".into()),
+            hostname: None,
+            os_hint: None,
+            services: vec![crate::model::ServiceInfo {
+                port: 22, protocol: "tcp".into(), name: "ssh".into(),
+                version: "OpenSSH 9".into(), state: "open".into(), banner: String::new(),
+            }],
+        };
+        engine.apply_nmap_results("en0", &[nmap]).await.unwrap();
+
+        // Apply banner
+        let banner = crate::collector::banner::BannerResult {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ip: "10.0.0.1".into(),
+            port: 22,
+            protocol: "tcp".into(),
+            banner: "SSH-2.0-OpenSSH_9.6".into(),
+            fingerprints: vec![],
+        };
+        engine.apply_banners(&[banner]).await.unwrap();
+
+        let host = engine.state.hosts.get("aa:bb:cc:dd:ee:ff").unwrap();
+        assert_eq!(host.services[0].banner, "SSH-2.0-OpenSSH_9.6");
+    }
+
+    #[tokio::test]
+    async fn apply_banners_merges_fingerprints() {
+        let engine = make_engine(FilterConfig::default());
+        engine
+            .apply_arp_results(&[arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.1", "en0")])
+            .await
+            .unwrap();
+
+        let banner = crate::collector::banner::BannerResult {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ip: "10.0.0.1".into(),
+            port: 80,
+            protocol: "tcp".into(),
+            banner: String::new(),
+            fingerprints: vec![Fingerprint {
+                source: FingerprintSource::Banner,
+                category: "sw".into(),
+                key: "http_server.80".into(),
+                value: "nginx/1.25".into(),
+                confidence: 0.85,
+                observed_at: Utc::now(),
+            }],
+        };
+        engine.apply_banners(&[banner]).await.unwrap();
+
+        let host = engine.state.hosts.get("aa:bb:cc:dd:ee:ff").unwrap();
+        assert!(host.fingerprints.iter().any(|f| f.value == "nginx/1.25"));
+    }
+
+    // ── apply_wifi_scan ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn apply_wifi_adds_new_network() {
+        let engine = make_engine(FilterConfig::default());
+        let wifi = crate::model::WifiInfo {
+            ssid: "TestNet".into(), bssid: "10:22:33:44:55:66".into(),
+            rssi: -55, noise: -90, channel: 36, band: "5GHz".into(),
+            security: "WPA3".into(), interface: "en0".into(),
+        };
+        engine.apply_wifi_scan(&[wifi]).await.unwrap();
+        assert_eq!(engine.state.wifi_networks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_wifi_removes_vanished_network() {
+        let engine = make_engine(FilterConfig::default());
+        let wifi1 = crate::model::WifiInfo {
+            ssid: "Net1".into(), bssid: "10:22:33:44:55:66".into(),
+            rssi: -55, noise: -90, channel: 36, band: "5GHz".into(),
+            security: "WPA3".into(), interface: "en0".into(),
+        };
+        let wifi2 = crate::model::WifiInfo {
+            ssid: "Net2".into(), bssid: "20:22:33:44:55:66".into(),
+            rssi: -60, noise: -90, channel: 6, band: "2.4GHz".into(),
+            security: "WPA2".into(), interface: "en0".into(),
+        };
+        engine.apply_wifi_scan(&[wifi1, wifi2]).await.unwrap();
+        assert_eq!(engine.state.wifi_networks.len(), 2);
+
+        // Second scan only has wifi1 — wifi2 should be removed
+        let wifi1_again = crate::model::WifiInfo {
+            ssid: "Net1".into(), bssid: "10:22:33:44:55:66".into(),
+            rssi: -50, noise: -90, channel: 36, band: "5GHz".into(),
+            security: "WPA3".into(), interface: "en0".into(),
+        };
+        engine.apply_wifi_scan(&[wifi1_again]).await.unwrap();
+        assert_eq!(engine.state.wifi_networks.len(), 1);
+        assert!(engine.state.wifi_networks.get("10:22:33:44:55:66").is_some());
+    }
+
+    // ── IP reverse index ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ip_reverse_index_maintained() {
+        let engine = make_engine(FilterConfig::default());
+        engine
+            .apply_arp_results(&[arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.1", "en0")])
+            .await
+            .unwrap();
+
+        // IP → MAC lookup should work
+        let host = engine.state.get_host("10.0.0.1");
+        assert!(host.is_some());
+        assert_eq!(host.unwrap().mac, "aa:bb:cc:dd:ee:ff");
+    }
+
+    #[tokio::test]
+    async fn ip_reverse_index_cleaned_on_prune() {
+        let engine = make_engine(FilterConfig::default());
+
+        let host = HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: String::new(),
+            addresses: vec!["10.0.0.1".parse().unwrap()],
+            hostname: None, os_hint: None,
+            services: vec![], fingerprints: vec![],
+            interface: "en0".into(), network_id: String::new(),
+            first_seen: Utc::now() - chrono::Duration::hours(48),
+            last_seen: Utc::now() - chrono::Duration::hours(25),
+        };
+        engine.state.insert_host(host.mac.clone(), host);
+        engine.state.ip_to_mac.insert("10.0.0.1".parse().unwrap(), "aa:bb:cc:dd:ee:ff".into());
+
+        engine.prune_stale_hosts(86400).await.unwrap();
+
+        // IP index should be cleaned
+        assert!(engine.state.ip_to_mac.get(&"10.0.0.1".parse::<std::net::IpAddr>().unwrap()).is_none());
+    }
+
+    // ── Empty inputs ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn apply_empty_arp_results() {
+        let engine = make_engine(FilterConfig::default());
+        engine.apply_arp_results(&[]).await.unwrap();
+        assert_eq!(engine.state.hosts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn apply_empty_interface_state() {
+        let engine = make_engine(FilterConfig::default());
+        engine.apply_interface_state(&[]).await.unwrap();
+        assert_eq!(engine.state.interfaces.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn apply_empty_wifi_scan() {
+        let engine = make_engine(FilterConfig::default());
+        engine.apply_wifi_scan(&[]).await.unwrap();
+        assert_eq!(engine.state.wifi_networks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn apply_empty_nmap_results() {
+        let engine = make_engine(FilterConfig::default());
+        engine.apply_nmap_results("en0", &[]).await.unwrap();
+        assert_eq!(engine.state.hosts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn apply_empty_banners() {
+        let engine = make_engine(FilterConfig::default());
+        engine.apply_banners(&[]).await.unwrap();
+    }
 }
