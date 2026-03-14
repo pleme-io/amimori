@@ -327,6 +327,10 @@ rec {
             packageId = "serde_json";
           }
           {
+            name = "serde_yaml";
+            packageId = "serde_yaml";
+          }
+          {
             name = "shellexpand";
             packageId = "shellexpand";
           }
