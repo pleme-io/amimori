@@ -32,6 +32,46 @@ pub struct StateEngine {
     buffer_size: usize,
 }
 
+/// Promote best fingerprint values to the canonical HostInfo fields.
+/// Returns true if any field was updated.
+///
+/// Fingerprints are the SSOT for observed attributes. The canonical fields
+/// (hostname, os_hint) are derived views — updated when a fingerprint
+/// provides better data than the current field value.
+fn promote_fingerprints(host: &mut crate::model::HostInfo) -> bool {
+    let mut changed = false;
+
+    // Hostname: prefer highest confidence among net.hostname, net.dns_hostname, net.netbios_name
+    let best_hostname = host.fingerprints.iter()
+        .filter(|f| {
+            f.category == "net" && (f.key == "hostname" || f.key == "dns_hostname" || f.key == "netbios_name")
+        })
+        .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap_or(std::cmp::Ordering::Equal));
+
+    if let Some(fp) = best_hostname {
+        let dominated = host.hostname.as_ref().map_or(true, |old| old.len() < fp.value.len());
+        if dominated {
+            host.hostname = Some(fp.value.clone());
+            changed = true;
+        }
+    }
+
+    // OS hint: prefer highest confidence among os.name
+    let best_os = host.fingerprints.iter()
+        .filter(|f| f.category == "os" && f.key == "name")
+        .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap_or(std::cmp::Ordering::Equal));
+
+    if let Some(fp) = best_os {
+        let dominated = host.os_hint.as_ref().map_or(true, |old| old.len() < fp.value.len());
+        if dominated {
+            host.os_hint = Some(fp.value.clone());
+            changed = true;
+        }
+    }
+
+    changed
+}
+
 impl StateEngine {
     /// Production constructor — opens real database and OUI lookup.
     pub async fn new(
@@ -630,6 +670,10 @@ impl StateEngine {
                 for fp in &result.fingerprints {
                     changed |= host.merge_fingerprint(fp.clone());
                 }
+
+                // Promote best fingerprints to canonical fields.
+                // Fingerprints are the SSOT — canonical fields are derived views.
+                changed |= promote_fingerprints(&mut host);
 
                 if changed {
                     let snapshot = host.clone();
@@ -1982,5 +2026,82 @@ mod tests {
     async fn apply_empty_banners() {
         let engine = make_engine(FilterConfig::default());
         engine.apply_banners(&[]).await.unwrap();
+    }
+
+    // ── Fingerprint promotion ─────────────────────────────────────────
+
+    #[test]
+    fn promote_fingerprints_sets_hostname() {
+        let mut host = HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
+            addresses: vec![], hostname: None, os_hint: None,
+            services: vec![], fingerprints: vec![
+                Fingerprint {
+                    source: FingerprintSource::Mdns, category: "net".into(),
+                    key: "hostname".into(), value: "mydevice.local".into(),
+                    confidence: 0.95, observed_at: Utc::now(),
+                },
+            ],
+            interface: "en0".into(), network_id: String::new(),
+            first_seen: Utc::now(), last_seen: Utc::now(),
+        };
+        assert!(promote_fingerprints(&mut host));
+        assert_eq!(host.hostname.as_deref(), Some("mydevice.local"));
+    }
+
+    #[test]
+    fn promote_fingerprints_sets_os() {
+        let mut host = HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
+            addresses: vec![], hostname: None, os_hint: None,
+            services: vec![], fingerprints: vec![
+                Fingerprint {
+                    source: FingerprintSource::Nmap, category: "os".into(),
+                    key: "name".into(), value: "Linux 5.15".into(),
+                    confidence: 0.7, observed_at: Utc::now(),
+                },
+            ],
+            interface: "en0".into(), network_id: String::new(),
+            first_seen: Utc::now(), last_seen: Utc::now(),
+        };
+        assert!(promote_fingerprints(&mut host));
+        assert_eq!(host.os_hint.as_deref(), Some("Linux 5.15"));
+    }
+
+    #[test]
+    fn promote_fingerprints_no_change_when_empty() {
+        let mut host = HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
+            addresses: vec![], hostname: None, os_hint: None,
+            services: vec![], fingerprints: vec![],
+            interface: "en0".into(), network_id: String::new(),
+            first_seen: Utc::now(), last_seen: Utc::now(),
+        };
+        assert!(!promote_fingerprints(&mut host));
+    }
+
+    #[test]
+    fn promote_fingerprints_prefers_higher_confidence() {
+        let mut host = HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
+            addresses: vec![], hostname: None, os_hint: None,
+            services: vec![], fingerprints: vec![
+                Fingerprint {
+                    source: FingerprintSource::Nmap, category: "net".into(),
+                    key: "netbios_name".into(), value: "SHORT".into(),
+                    confidence: 0.9, observed_at: Utc::now(),
+                },
+                Fingerprint {
+                    source: FingerprintSource::Mdns, category: "net".into(),
+                    key: "hostname".into(), value: "device.local".into(),
+                    confidence: 0.95, observed_at: Utc::now(),
+                },
+            ],
+            interface: "en0".into(), network_id: String::new(),
+            first_seen: Utc::now(), last_seen: Utc::now(),
+        };
+        promote_fingerprints(&mut host);
+        // mDNS (0.95) wins over NetBIOS (0.90)
+        assert_eq!(host.hostname.as_deref(), Some("device.local"));
     }
 }
