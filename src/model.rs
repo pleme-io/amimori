@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 // ── In-memory state ────────────────────────────────────────────────────────
 
 /// Top-level concurrent network state shared across collectors and servers.
+///
+/// All host insertions go through `insert_host()` which enforces MAC
+/// validity (rejects broadcast, multicast, zero, and self MACs).
+/// This is the single enforcement point — callers don't need to
+/// pre-validate.
 pub struct NetworkState {
     pub interfaces: DashMap<String, InterfaceInfo>,
     pub hosts: DashMap<String, HostInfo>,
@@ -24,6 +29,21 @@ impl NetworkState {
             wifi_networks: DashMap::new(),
             sequence: AtomicU64::new(0),
         }
+    }
+
+    /// Insert a host, enforcing MAC validity and self-MAC filtering.
+    /// Returns false if the host was rejected (non-host MAC or self MAC).
+    pub fn insert_host(&self, mac: String, host: HostInfo) -> bool {
+        if is_non_host_mac(&mac) || self.is_self_mac(&mac) {
+            return false;
+        }
+        self.hosts.insert(mac, host);
+        true
+    }
+
+    /// Check if a MAC belongs to one of our monitored interfaces.
+    pub fn is_self_mac(&self, mac: &str) -> bool {
+        self.interfaces.iter().any(|e| e.value().mac == mac)
     }
 }
 

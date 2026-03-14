@@ -44,8 +44,12 @@ impl StateEngine {
         for iface in interfaces {
             state.interfaces.insert(iface.name.clone(), iface);
         }
+        // Interfaces must be loaded first — insert_host checks self-MACs
+        let mut rejected = 0usize;
         for host in hosts {
-            state.hosts.insert(host.mac.clone(), host);
+            if !state.insert_host(host.mac.clone(), host) {
+                rejected += 1;
+            }
         }
         for w in wifi {
             state.wifi_networks.insert(w.bssid.clone(), w);
@@ -55,6 +59,7 @@ impl StateEngine {
             hosts = state.hosts.len(),
             interfaces = state.interfaces.len(),
             wifi = state.wifi_networks.len(),
+            rejected,
             "state restored from database"
         );
 
@@ -134,14 +139,6 @@ impl StateEngine {
 
     // ── Apply methods ──────────────────────────────────────────────────
 
-    /// Check if a MAC belongs to one of our own monitored interfaces.
-    fn is_self_mac(&self, mac: &str) -> bool {
-        self.state
-            .interfaces
-            .iter()
-            .any(|e| e.value().mac == mac)
-    }
-
     pub async fn apply_arp_results(&self, entries: &[ArpEntry]) -> anyhow::Result<()> {
         let now = Utc::now();
 
@@ -150,7 +147,9 @@ impl StateEngine {
                 continue;
             };
 
-            if self.is_self_mac(&mac)
+            // Non-host and self-MAC filtering is enforced by NetworkState::insert_host,
+            // but we check filters here to avoid unnecessary vendor lookups.
+            if self.state.is_self_mac(&mac)
                 || self.filters.should_exclude_mac(&mac)
                 || self.filters.should_exclude_ip(&entry.ip)
             {
@@ -196,7 +195,7 @@ impl StateEngine {
                     last_seen: now,
                 };
 
-                self.state.hosts.insert(mac, host.clone());
+                self.state.insert_host(mac, host.clone());
                 self.emit(Change::HostAdded(host.clone())).await;
                 self.db.upsert_host(&host).await?;
             }
@@ -416,7 +415,7 @@ impl StateEngine {
                 continue;
             };
 
-            if self.is_self_mac(&mac) || self.filters.should_exclude_mac(&mac) {
+            if self.state.is_self_mac(&mac) || self.filters.should_exclude_mac(&mac) {
                 continue;
             }
 
@@ -538,7 +537,7 @@ impl StateEngine {
                     last_seen: now,
                 };
 
-                self.state.hosts.insert(mac, host.clone());
+                self.state.insert_host(mac, host.clone());
                 self.emit(Change::HostAdded(host.clone())).await;
                 self.db.upsert_host(&host).await?;
             }
