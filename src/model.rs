@@ -167,8 +167,39 @@ pub enum FingerprintSource {
     Mdns,
     Tls,
     Banner,
+    Dhcp,
     Passive,
     Manual,
+}
+
+/// Probe safety classification (ADR-013).
+///
+/// Every enrichment technique has a safety level. The daemon only runs
+/// probes at or below `collectors.max_probe_level` (default: 2 = discovery).
+/// This protects fragile IoT/OT devices from intrusive probing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeLevel {
+    /// Level 0: No packets sent. ARP table read, mDNS listen, DHCP observe.
+    Passive = 0,
+    /// Level 1: TCP connect + read. Banner grab, TLS handshake.
+    Safe = 1,
+    /// Level 2: Active probing. nmap -sV, HTTP GET, SMB negotiate.
+    Discovery = 2,
+    /// Level 3: Aggressive. nmap -O, SNMP walk, script scanning.
+    Intrusive = 3,
+}
+
+impl FingerprintSource {
+    /// The minimum probe level required to produce this type of fingerprint.
+    pub const fn probe_level(self) -> ProbeLevel {
+        match self {
+            Self::Arp | Self::Passive | Self::Dhcp | Self::Mdns => ProbeLevel::Passive,
+            Self::Banner | Self::Tls => ProbeLevel::Safe,
+            Self::Nmap => ProbeLevel::Discovery,
+            Self::Manual => ProbeLevel::Passive,
+        }
+    }
 }
 
 impl fmt::Display for FingerprintSource {
@@ -179,6 +210,7 @@ impl fmt::Display for FingerprintSource {
             Self::Mdns => f.write_str("mdns"),
             Self::Tls => f.write_str("tls"),
             Self::Banner => f.write_str("banner"),
+            Self::Dhcp => f.write_str("dhcp"),
             Self::Passive => f.write_str("passive"),
             Self::Manual => f.write_str("manual"),
         }

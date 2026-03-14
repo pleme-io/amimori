@@ -82,6 +82,11 @@ impl GrpcConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectorConfig {
+    /// Maximum probe safety level (0=passive, 1=safe, 2=discovery, 3=intrusive).
+    /// Collectors above this level are disabled. Default 2 (discovery).
+    #[serde(default = "default_2_u8")]
+    pub max_probe_level: u8,
+
     #[serde(default)]
     pub arp: ArpCollectorConfig,
 
@@ -98,6 +103,7 @@ pub struct CollectorConfig {
 impl Default for CollectorConfig {
     fn default() -> Self {
         Self {
+            max_probe_level: 2,
             arp: ArpCollectorConfig::default(),
             interface: InterfaceCollectorConfig::default(),
             wifi: WifiCollectorConfig::default(),
@@ -434,6 +440,9 @@ fn default_nmap_bin() -> String {
 }
 const fn default_200_u16() -> u16 {
     200
+}
+const fn default_2_u8() -> u8 {
+    2
 }
 const fn default_7_u8() -> u8 {
     7
