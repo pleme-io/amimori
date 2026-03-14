@@ -128,6 +128,35 @@ launchd/systemd so `-O` works.
 The state engine's delta patching ensures richer data replaces weaker data
 without clobbering.
 
+## ADR-010: Non-Blocking Event Broadcast
+
+**Context:** The state engine emitted events to gRPC subscribers via
+`Vec<mpsc::Sender>`. If any subscriber was slow or hung, the `emit()`
+call blocked, stalling all state updates for all clients.
+
+**Decision:** Replace `Vec<mpsc::Sender>` with `tokio::sync::broadcast::Sender`.
+Broadcast is non-blocking — if a receiver is slow, it falls behind and gets
+`RecvError::Lagged(n)`. The gRPC Subscribe handler logs lagged events and
+continues. Clients can catch up via the `GetChanges` RPC.
+
+**Consequence:** No single client can stall the state engine. The broadcast
+channel capacity is `storage.event_buffer_size` (default 10,000). Clients
+that fall behind lose events but never block other clients.
+
+## ADR-011: IP→MAC Reverse Index
+
+**Context:** `get_host(addr)` accepted both MAC and IP but IP lookup was
+O(n) — linear scan over all hosts checking `addresses.contains(&ip)`.
+With 10,000 hosts this is measurable latency on every gRPC query.
+
+**Decision:** `NetworkState` maintains a `DashMap<IpAddr, String>` reverse
+index. `insert_host()` updates it automatically. Host removal cleans it.
+`get_host()` tries MAC first, then IP index — both O(1).
+
+**Consequence:** IP lookups are constant time. The index adds ~40 bytes per
+IP address (IpAddr + String MAC key). For 10,000 hosts with 1-2 IPs each,
+this is ~400-800 KB — trivial.
+
 ## ADR-009: DNS Deduplication at Parse Time
 
 **Context:** macOS `scutil --dns` lists dozens of resolver stanzas for the
