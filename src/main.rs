@@ -43,6 +43,21 @@ enum Cli {
     },
     /// Query daemon status via gRPC
     Status,
+    /// Check network scan convergence
+    Convergence {
+        /// Wait for convergence instead of returning immediately
+        #[arg(long)]
+        wait: bool,
+        /// Convergence threshold (0.0-1.0, default 0.95)
+        #[arg(long, default_value = "0.95")]
+        threshold: f32,
+        /// Max wait time in seconds (default 300)
+        #[arg(long, default_value = "300")]
+        timeout: u64,
+        /// Output as JSON instead of human-readable
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl Default for Cli {
@@ -118,6 +133,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("amimori: not running ({grpc_url}: {e})");
                     std::process::exit(1);
                 }
+            }
+        }
+        Cli::Convergence { wait, threshold, timeout, json } => {
+            let grpc_url = std::env::var("AMIMORI_GRPC_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
+
+            let mut client = match grpc::proto::network_profiler_client::NetworkProfilerClient::connect(
+                grpc_url.clone(),
+            ).await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("amimori: not running ({grpc_url}: {e})");
+                    std::process::exit(1);
+                }
+            };
+
+            let resp = if wait {
+                client.wait_for_convergence(grpc::proto::ConvergenceRequest {
+                    threshold,
+                    timeout_secs: timeout as u32,
+                }).await?
+            } else {
+                client.get_convergence(grpc::proto::Empty {}).await?
+            };
+
+            let c = resp.into_inner();
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "score": c.score,
+                    "phase": c.phase,
+                    "converged": c.phase == "converged",
+                    "uptime_secs": c.uptime_secs,
+                    "total_hosts": c.total_hosts,
+                    "enriched_hosts": c.enriched_hosts,
+                    "since_new_host_secs": c.since_new_host_secs,
+                    "since_new_service_secs": c.since_new_service_secs,
+                    "stable_arp_cycles": c.stable_arp_cycles,
+                    "stable_nmap_cycles": c.stable_nmap_cycles,
+                    "collectors_reported": c.collectors_reported,
+                    "expected_collectors": c.expected_collectors,
+                }))?);
+            } else {
+                println!("convergence: {:.0}% ({})", c.score * 100.0, c.phase);
+                println!("  hosts: {} ({} enriched)", c.total_hosts, c.enriched_hosts);
+                println!("  since new host: {}s", c.since_new_host_secs);
+                println!("  since new service: {}s", c.since_new_service_secs);
+                println!("  stable ARP cycles: {}", c.stable_arp_cycles);
+                println!("  stable nmap cycles: {}", c.stable_nmap_cycles);
+                println!("  collectors: {}/{}", c.collectors_reported, c.expected_collectors);
+                println!("  uptime: {}s", c.uptime_secs);
+                if c.phase == "converged" {
+                    println!("\n✓ Network converged — safe to analyze.");
+                } else {
+                    println!("\n⏳ Not yet converged.");
+                }
+            }
+
+            // Exit code 0 if converged, 1 if not
+            if c.phase != "converged" && !wait {
+                std::process::exit(1);
             }
         }
     }

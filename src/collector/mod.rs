@@ -264,6 +264,14 @@ pub async fn run_actors(
                             );
                         }
 
+                        // Track convergence: record collector activity
+                        engine.convergence.on_collector_reported(&name);
+
+                        // Track stable cycles for convergence detection
+                        let host_count_before = engine.state.hosts.len();
+                        let svc_count_before: usize = engine.state.hosts.iter()
+                            .map(|e| e.value().services.len()).sum();
+
                         if let Err(e) = apply_output(&engine, output).await {
                             tracing::error!(
                                 actor = %name,
@@ -271,6 +279,18 @@ pub async fn run_actors(
                                 kind = run_kind,
                                 "failed to apply output"
                             );
+                        }
+
+                        // Check if this cycle discovered anything new
+                        let host_count_after = engine.state.hosts.len();
+                        let svc_count_after: usize = engine.state.hosts.iter()
+                            .map(|e| e.value().services.len()).sum();
+
+                        if host_count_after == host_count_before {
+                            engine.convergence.on_arp_cycle_stable();
+                        }
+                        if svc_count_after == svc_count_before {
+                            engine.convergence.on_nmap_cycle_stable();
                         }
                     }
                     Err(e) => {

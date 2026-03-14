@@ -25,6 +25,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Tracks convergence state. Updated by the state engine on every event.
+/// The convergence score can be derived from the events table (SSOT)
+/// by counting event types in recent time windows:
+///   - host_added events in last 5min → discovery rate
+///   - service_added events in last 3min → enrichment rate
+///   - total unique event types → collector coverage
+/// The tracker is an in-memory cache of this derived state for performance.
 pub struct ConvergenceTracker {
     /// When the daemon started (or last network transition).
     epoch: DateTime<Utc>,
