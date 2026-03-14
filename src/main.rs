@@ -317,39 +317,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut client = grpc_client().await;
             let resp = client.get_snapshot(grpc::proto::SnapshotRequest::default()).await?;
             let s = resp.into_inner();
-            let hosts: Vec<_> = s.hosts.iter().map(|h| crate::model::HostInfo {
-                mac: h.mac.clone(), vendor: h.vendor.clone(),
-                addresses: h.ipv4.iter().chain(h.ipv6.iter()).filter_map(|s| s.parse().ok()).collect(),
-                hostname: None, os_hint: None, services: vec![], fingerprints: vec![],
-                interface: h.interface.clone(), network_id: String::new(),
-                first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
-            }).collect();
-            let interfaces: Vec<_> = s.interfaces.iter().map(|i| crate::model::InterfaceInfo {
-                name: i.name.clone(), mac: i.mac.clone(),
-                ipv4: i.ipv4.iter().filter_map(|s| s.parse().ok()).collect(),
-                ipv6: i.ipv6.iter().filter_map(|s| s.parse().ok()).collect(),
-                gateway: i.gateway.clone(), subnet: i.subnet.clone(),
-                is_up: i.is_up, kind: crate::model::InterfaceKind::from_name(&i.name),
-                dns: i.dns.clone(),
-            }).collect();
+            let hosts: Vec<_> = s.hosts.iter().map(grpc::proto_to_host_info).collect();
+            let interfaces: Vec<_> = s.interfaces.iter().map(grpc::proto_to_interface_info).collect();
             print!("{}", crate::topology::format_topology(&crate::topology::build_topology(&hosts, &interfaces)));
         }
         Cli::Export { format } => {
             let mut client = grpc_client().await;
             let resp = client.get_snapshot(grpc::proto::SnapshotRequest::default()).await?;
-            let hosts: Vec<_> = resp.into_inner().hosts.iter().map(|h| crate::model::HostInfo {
-                mac: h.mac.clone(), vendor: h.vendor.clone(),
-                addresses: h.ipv4.iter().chain(h.ipv6.iter()).filter_map(|s| s.parse().ok()).collect(),
-                hostname: if h.hostname.is_empty() { None } else { Some(h.hostname.clone()) },
-                os_hint: if h.os_hint.is_empty() { None } else { Some(h.os_hint.clone()) },
-                services: h.services.iter().map(|s| crate::model::ServiceInfo {
-                    port: s.port as u16, protocol: s.protocol.clone(),
-                    name: s.name.clone(), version: s.version.clone(),
-                    state: s.state.clone(), banner: String::new(),
-                }).collect(),
-                fingerprints: vec![], interface: h.interface.clone(),
-                network_id: String::new(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
-            }).collect();
+            let hosts: Vec<_> = resp.into_inner().hosts.iter()
+                .map(grpc::proto_to_host_info).collect();
             match format.as_str() {
                 "csv" => print!("{}", crate::export::to_csv(&hosts)),
                 _ => print!("{}", crate::export::to_json(&hosts)),

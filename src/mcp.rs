@@ -243,30 +243,8 @@ impl AmimoriMcp {
                 let snapshot = resp.into_inner();
                 let format = input.format.as_deref().unwrap_or("json");
 
-                // Convert proto hosts to model hosts for export
-                let hosts: Vec<crate::model::HostInfo> = snapshot.hosts.iter().map(|h| {
-                    crate::model::HostInfo {
-                        mac: h.mac.clone(),
-                        vendor: h.vendor.clone(),
-                        addresses: h.ipv4.iter().chain(h.ipv6.iter())
-                            .filter_map(|s| s.parse().ok()).collect(),
-                        hostname: if h.hostname.is_empty() { None } else { Some(h.hostname.clone()) },
-                        os_hint: if h.os_hint.is_empty() { None } else { Some(h.os_hint.clone()) },
-                        services: h.services.iter().map(|s| crate::model::ServiceInfo {
-                            port: s.port as u16,
-                            protocol: s.protocol.clone(),
-                            name: s.name.clone(),
-                            version: s.version.clone(),
-                            state: s.state.clone(),
-                            banner: String::new(),
-                        }).collect(),
-                        fingerprints: Vec::new(),
-                        interface: h.interface.clone(),
-                        network_id: String::new(),
-                        first_seen: chrono::Utc::now(),
-                        last_seen: chrono::Utc::now(),
-                    }
-                }).collect();
+                let hosts: Vec<crate::model::HostInfo> = snapshot.hosts.iter()
+                    .map(crate::grpc::proto_to_host_info).collect();
 
                 match format {
                     "csv" => crate::export::to_csv(&hosts),
@@ -285,32 +263,10 @@ impl AmimoriMcp {
             Ok(resp) => {
                 let snapshot = resp.into_inner();
 
-                let hosts: Vec<crate::model::HostInfo> = snapshot.hosts.iter().map(|h| {
-                    crate::model::HostInfo {
-                        mac: h.mac.clone(),
-                        vendor: h.vendor.clone(),
-                        addresses: h.ipv4.iter().chain(h.ipv6.iter())
-                            .filter_map(|s| s.parse().ok()).collect(),
-                        hostname: if h.hostname.is_empty() { None } else { Some(h.hostname.clone()) },
-                        os_hint: None, services: vec![], fingerprints: vec![],
-                        interface: h.interface.clone(), network_id: String::new(),
-                        first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
-                    }
-                }).collect();
-
-                let interfaces: Vec<crate::model::InterfaceInfo> = snapshot.interfaces.iter().map(|i| {
-                    crate::model::InterfaceInfo {
-                        name: i.name.clone(),
-                        mac: i.mac.clone(),
-                        ipv4: i.ipv4.iter().filter_map(|s| s.parse().ok()).collect(),
-                        ipv6: i.ipv6.iter().filter_map(|s| s.parse().ok()).collect(),
-                        gateway: i.gateway.clone(),
-                        subnet: i.subnet.clone(),
-                        is_up: i.is_up,
-                        kind: crate::model::InterfaceKind::from_name(&i.name),
-                        dns: i.dns.clone(),
-                    }
-                }).collect();
+                let hosts: Vec<crate::model::HostInfo> = snapshot.hosts.iter()
+                    .map(crate::grpc::proto_to_host_info).collect();
+                let interfaces: Vec<crate::model::InterfaceInfo> = snapshot.interfaces.iter()
+                    .map(crate::grpc::proto_to_interface_info).collect();
 
                 let topo = crate::topology::build_topology(&hosts, &interfaces);
                 crate::topology::format_topology(&topo)

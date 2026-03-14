@@ -200,6 +200,68 @@ impl NetworkProfiler for ProfilerService {
     }
 }
 
+// ── Public proto→model conversions (used by CLI and MCP) ──────────────────
+
+/// Convert a proto Host to the domain HostInfo. Shared by CLI, MCP, and
+/// any other consumer that receives proto messages and needs the domain type.
+pub fn proto_to_host_info(h: &Host) -> HostInfo {
+    HostInfo {
+        mac: h.mac.clone(),
+        vendor: h.vendor.clone(),
+        addresses: h.ipv4.iter().chain(h.ipv6.iter())
+            .filter_map(|s| s.parse().ok()).collect(),
+        hostname: if h.hostname.is_empty() { None } else { Some(h.hostname.clone()) },
+        os_hint: if h.os_hint.is_empty() { None } else { Some(h.os_hint.clone()) },
+        services: h.services.iter().map(|s| ServiceInfo {
+            port: s.port as u16, protocol: s.protocol.clone(),
+            name: s.name.clone(), version: s.version.clone(),
+            state: s.state.clone(), banner: String::new(),
+        }).collect(),
+        fingerprints: h.fingerprints.iter().map(|f| crate::model::Fingerprint {
+            source: match f.source.as_str() {
+                "arp" => crate::model::FingerprintSource::Arp,
+                "nmap" => crate::model::FingerprintSource::Nmap,
+                "mdns" => crate::model::FingerprintSource::Mdns,
+                "tls" => crate::model::FingerprintSource::Tls,
+                "banner" => crate::model::FingerprintSource::Banner,
+                "dhcp" => crate::model::FingerprintSource::Dhcp,
+                "passive" => crate::model::FingerprintSource::Passive,
+                _ => crate::model::FingerprintSource::Manual,
+            },
+            category: f.category.clone(),
+            key: f.key.clone(),
+            value: f.value.clone(),
+            confidence: f.confidence,
+            observed_at: chrono::Utc::now(),
+        }).collect(),
+        interface: h.interface.clone(),
+        network_id: String::new(),
+        first_seen: h.first_seen.as_ref().map(|t| {
+            chrono::DateTime::from_timestamp(t.seconds, t.nanos as u32)
+                .unwrap_or_default()
+        }).unwrap_or_default(),
+        last_seen: h.last_seen.as_ref().map(|t| {
+            chrono::DateTime::from_timestamp(t.seconds, t.nanos as u32)
+                .unwrap_or_default()
+        }).unwrap_or_default(),
+    }
+}
+
+/// Convert a proto NetworkInterface to the domain InterfaceInfo.
+pub fn proto_to_interface_info(i: &NetworkInterface) -> InterfaceInfo {
+    InterfaceInfo {
+        name: i.name.clone(),
+        mac: i.mac.clone(),
+        ipv4: i.ipv4.iter().filter_map(|s| s.parse().ok()).collect(),
+        ipv6: i.ipv6.iter().filter_map(|s| s.parse().ok()).collect(),
+        gateway: i.gateway.clone(),
+        subnet: i.subnet.clone(),
+        is_up: i.is_up,
+        kind: crate::model::InterfaceKind::from_name(&i.name),
+        dns: i.dns.clone(),
+    }
+}
+
 // ── Server lifecycle ───────────────────────────────────────────────────────
 
 pub async fn serve(
