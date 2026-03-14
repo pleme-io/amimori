@@ -63,6 +63,18 @@ struct WifiInput {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct WakeInput {
+    #[schemars(description = "MAC address of the host to wake")]
+    mac: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ExportInput {
+    #[schemars(description = "Export format: csv or json")]
+    format: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct EmptyInput {}
 
 // ── MCP Server ─────────────────────────────────────────────────────────────
@@ -199,6 +211,68 @@ impl AmimoriMcp {
 
         match client.list_interfaces(proto::Empty {}).await {
             Ok(resp) => format_interfaces(&resp.into_inner().interfaces),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "Send Wake-on-LAN magic packet to a host by MAC address")]
+    async fn network_wake(&self, Parameters(input): Parameters<WakeInput>) -> String {
+        let mac_bytes: Vec<u8> = input.mac.split(':')
+            .filter_map(|s| u8::from_str_radix(s, 16).ok())
+            .collect();
+
+        if mac_bytes.len() != 6 {
+            return format!("error: invalid MAC address '{}'", input.mac);
+        }
+
+        let mut mac_arr = [0u8; 6];
+        mac_arr.copy_from_slice(&mac_bytes);
+        let packet = wake_on_lan::MagicPacket::new(&mac_arr);
+        match packet.send() {
+            Ok(()) => format!("WoL magic packet sent to {}", input.mac),
+            Err(e) => format!("error sending WoL: {e}"),
+        }
+    }
+
+    #[tool(description = "Export full host inventory as CSV or JSON")]
+    async fn network_export(&self, Parameters(input): Parameters<ExportInput>) -> String {
+        let mut client = self.client();
+
+        match client.get_snapshot(proto::SnapshotRequest::default()).await {
+            Ok(resp) => {
+                let snapshot = resp.into_inner();
+                let format = input.format.as_deref().unwrap_or("json");
+
+                // Convert proto hosts to model hosts for export
+                let hosts: Vec<crate::model::HostInfo> = snapshot.hosts.iter().map(|h| {
+                    crate::model::HostInfo {
+                        mac: h.mac.clone(),
+                        vendor: h.vendor.clone(),
+                        addresses: h.ipv4.iter().chain(h.ipv6.iter())
+                            .filter_map(|s| s.parse().ok()).collect(),
+                        hostname: if h.hostname.is_empty() { None } else { Some(h.hostname.clone()) },
+                        os_hint: if h.os_hint.is_empty() { None } else { Some(h.os_hint.clone()) },
+                        services: h.services.iter().map(|s| crate::model::ServiceInfo {
+                            port: s.port as u16,
+                            protocol: s.protocol.clone(),
+                            name: s.name.clone(),
+                            version: s.version.clone(),
+                            state: s.state.clone(),
+                            banner: String::new(),
+                        }).collect(),
+                        fingerprints: Vec::new(),
+                        interface: h.interface.clone(),
+                        network_id: String::new(),
+                        first_seen: chrono::Utc::now(),
+                        last_seen: chrono::Utc::now(),
+                    }
+                }).collect();
+
+                match format {
+                    "csv" => crate::export::to_csv(&hosts),
+                    _ => crate::export::to_json(&hosts),
+                }
+            }
             Err(e) => format!("error: {e}"),
         }
     }

@@ -13,7 +13,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pnet::datalink::{self, Channel::Ethernet, NetworkInterface};
+use pnet::datalink::{self, Channel::Ethernet};
 use pnet::packet::arp::{ArpHardwareTypes, ArpOperations, ArpPacket, MutableArpPacket};
 use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
 use pnet::packet::{MutablePacket, Packet};

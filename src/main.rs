@@ -4,6 +4,7 @@ mod daemon;
 mod db;
 mod enrichment;
 mod error;
+mod export;
 mod event_bus;
 mod grpc;
 mod mcp;

@@ -3,6 +3,7 @@ pub mod arp_scan;
 pub mod banner;
 pub mod dns;
 pub mod interface;
+pub mod lldp;
 pub mod mdns;
 pub mod passive;
 pub mod scanner;

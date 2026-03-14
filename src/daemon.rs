@@ -186,6 +186,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     ));
     tracing::info!("UPnP/SSDP discovery enabled");
 
+    // LLDP/CDP — passive capture of switch/router/AP announcements.
+    // Safety level 0 (passive, L2 frame capture).
+    actors.push((
+        Box::new(collector::lldp::LldpCollector::new(&config)),
+        ActorConfig::interval_only(),
+    ));
+    tracing::info!("LLDP/CDP passive capture enabled");
+
     if actors.is_empty() {
         anyhow::bail!(
             "no collector actors could be initialized — check config and tool availability"
