@@ -38,6 +38,7 @@
       toolName = "amimori";
       src = self;
       repo = "pleme-io/amimori";
+      nativeBuildInputs = [ "protobuf" ];
       crateOverrides = {
         rmcp = attrs: {
           CARGO_CRATE_NAME = "rmcp";
