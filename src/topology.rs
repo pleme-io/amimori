@@ -192,6 +192,7 @@ mod tests {
                 addresses: vec!["10.0.0.10".parse().unwrap()],
                 hostname: None, os_hint: None, services: vec![], fingerprints: vec![],
                 interface: "en0".into(), network_id: String::new(),
+                status: crate::model::HostStatus::default(),
                 first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
             },
             HostInfo {
@@ -199,6 +200,7 @@ mod tests {
                 addresses: vec!["10.0.0.20".parse().unwrap()],
                 hostname: None, os_hint: None, services: vec![], fingerprints: vec![],
                 interface: "en0".into(), network_id: String::new(),
+                status: crate::model::HostStatus::default(),
                 first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
             },
         ];

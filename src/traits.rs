@@ -166,6 +166,9 @@ pub trait StorageBackend: Send + Sync {
     async fn prune_events(&self, ttl_secs: u64) -> anyhow::Result<u64>;
     async fn upsert_network(&self, network: &NetworkInfo) -> anyhow::Result<()>;
     async fn hosts_for_network(&self, network_id: &str) -> anyhow::Result<Vec<HostInfo>>;
+    async fn migrate_hosts_network_id(&self, old_id: &str, new_id: &str) -> anyhow::Result<u64>;
+    async fn bump_network_connection(&self, network_id: &str) -> anyhow::Result<()>;
+    async fn get_network(&self, id: &str) -> anyhow::Result<Option<NetworkInfo>>;
 }
 
 // ── Gateway / DNS providers ────────────────────────────────────────────────
@@ -364,6 +367,26 @@ pub mod mocks {
                 .cloned()
                 .collect())
         }
+
+        async fn migrate_hosts_network_id(&self, old_id: &str, new_id: &str) -> anyhow::Result<u64> {
+            let mut hosts = self.hosts.lock().unwrap();
+            let mut count = 0u64;
+            for host in hosts.values_mut() {
+                if host.network_id == old_id {
+                    host.network_id = new_id.to_string();
+                    count += 1;
+                }
+            }
+            Ok(count)
+        }
+
+        async fn bump_network_connection(&self, _network_id: &str) -> anyhow::Result<()> {
+            Ok(()) // no-op for tests
+        }
+
+        async fn get_network(&self, _id: &str) -> anyhow::Result<Option<NetworkInfo>> {
+            Ok(None) // no-op for tests
+        }
     }
 
     /// Mock gateway provider.
@@ -405,6 +428,7 @@ pub mod mocks {
                 fingerprints: vec![],
                 interface: "en0".into(),
                 network_id: String::new(),
+                status: crate::model::HostStatus::default(),
                 first_seen: Utc::now(),
                 last_seen: Utc::now(),
             }

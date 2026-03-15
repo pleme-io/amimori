@@ -26,6 +26,10 @@ pub struct Config {
     #[serde(default)]
     pub filters: FilterConfig,
 
+    /// Network resilience settings.
+    #[serde(default)]
+    pub network: NetworkConfig,
+
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -39,6 +43,7 @@ impl Default for Config {
             collectors: CollectorConfig::default(),
             storage: StorageConfig::default(),
             filters: FilterConfig::default(),
+            network: NetworkConfig::default(),
             logging: LoggingConfig::default(),
         }
     }
@@ -482,6 +487,28 @@ impl Default for RetentionConfig {
             prune_interval: default_prune_interval(),
         }
     }
+}
+
+// ── Network config ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    /// Seconds before a stale host is removed. First prune marks stale,
+    /// second removes (double-TTL grace period).
+    #[serde(default = "default_stale_grace_secs")]
+    pub stale_grace_secs: u64,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            stale_grace_secs: default_stale_grace_secs(),
+        }
+    }
+}
+
+const fn default_stale_grace_secs() -> u64 {
+    3600
 }
 
 // ── Filter config ──────────────────────────────────────────────────────────

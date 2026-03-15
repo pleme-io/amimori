@@ -236,6 +236,7 @@ pub fn proto_to_host_info(h: &Host) -> HostInfo {
         }).collect(),
         interface: h.interface.clone(),
         network_id: String::new(),
+        status: crate::model::HostStatus::default(),
         first_seen: h.first_seen.as_ref().map(|t| {
             chrono::DateTime::from_timestamp(t.seconds, t.nanos as u32)
                 .unwrap_or_default()
@@ -471,6 +472,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: "10.0.0.1|255.255.255.0".into(),
+            status: crate::model::HostStatus::default(),
             first_seen: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
             last_seen: Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
         }

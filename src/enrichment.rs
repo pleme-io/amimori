@@ -328,6 +328,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
+            status: crate::model::HostStatus::default(),
             first_seen: Utc::now() - chrono::Duration::hours(24),
             last_seen: Utc::now(),
         }

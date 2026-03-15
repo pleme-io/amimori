@@ -290,6 +290,7 @@ mod tests {
             addresses: vec![ip],
             hostname: None, os_hint: None, services: vec![], fingerprints: vec![],
             interface: "en0".into(), network_id: String::new(),
+            status: crate::model::HostStatus::default(),
             first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
         });
         engine.state.ip_to_mac.insert(ip, "aa:bb:cc:dd:ee:ff".into());
@@ -335,7 +336,7 @@ mod tests {
             mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
             addresses: vec![ip], hostname: None, os_hint: None,
             services: vec![], fingerprints: vec![], interface: "en0".into(),
-            network_id: String::new(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+            network_id: String::new(), status: crate::model::HostStatus::default(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
         });
         engine.state.ip_to_mac.insert(ip, "aa:bb:cc:dd:ee:ff".into());
 
@@ -362,7 +363,7 @@ mod tests {
             mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
             addresses: vec![ip], hostname: None, os_hint: None,
             services: vec![], fingerprints: vec![], interface: "en0".into(),
-            network_id: String::new(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+            network_id: String::new(), status: crate::model::HostStatus::default(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
         });
         engine.state.ip_to_mac.insert(ip, "aa:bb:cc:dd:ee:ff".into());
 
@@ -408,7 +409,7 @@ mod tests {
             mac: "aa:bb:cc:dd:ee:ff".into(), vendor: String::new(),
             addresses: vec![ip], hostname: None, os_hint: None,
             services: vec![], fingerprints: vec![], interface: "en0".into(),
-            network_id: String::new(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
+            network_id: String::new(), status: crate::model::HostStatus::default(), first_seen: chrono::Utc::now(), last_seen: chrono::Utc::now(),
         });
         engine.state.ip_to_mac.insert(ip, "aa:bb:cc:dd:ee:ff".into());
 

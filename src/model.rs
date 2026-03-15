@@ -21,6 +21,8 @@ pub struct NetworkState {
     /// Maintained automatically by `insert_host()`.
     pub ip_to_mac: DashMap<IpAddr, String>,
     pub wifi_networks: DashMap<String, WifiInfo>,
+    /// Per-interface active network tracking.
+    pub active_networks: DashMap<String, NetworkInfo>,
     pub sequence: AtomicU64,
 }
 
@@ -31,6 +33,7 @@ impl NetworkState {
             hosts: DashMap::new(),
             ip_to_mac: DashMap::new(),
             wifi_networks: DashMap::new(),
+            active_networks: DashMap::new(),
             sequence: AtomicU64::new(0),
         }
     }
@@ -251,6 +254,21 @@ impl Fingerprint {
     }
 }
 
+// ── Host status ────────────────────────────────────────────────────────────
+
+/// Lifecycle status of a host in the network state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HostStatus {
+    /// Recently confirmed by ARP or other active observation.
+    #[default]
+    Active,
+    /// Not seen recently — will be removed on next prune if still unseen.
+    Stale,
+    /// Restored from database (known from a previous session). Not yet confirmed.
+    Historical,
+}
+
 // ── Host info ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -269,6 +287,9 @@ pub struct HostInfo {
     pub interface: String,
     /// Identifies which logical network this host was seen on (gateway|subnet).
     pub network_id: String,
+    /// Lifecycle status: Active, Stale, or Historical.
+    #[serde(default)]
+    pub status: HostStatus,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
 }
@@ -810,6 +831,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now() - chrono::Duration::hours(48),
             last_seen: Utc::now() - chrono::Duration::hours(25),
         };
@@ -829,6 +851,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now() - chrono::Duration::hours(1),
             last_seen: Utc::now(),
         };
@@ -850,6 +873,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now(),
             last_seen: Utc::now(),
         };
@@ -896,6 +920,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now() - chrono::Duration::hours(24),
             last_seen: Utc::now(),
         }

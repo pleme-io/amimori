@@ -203,17 +203,25 @@ impl StateEngine {
         self.state.get_host(addr)
     }
 
-    /// Get the current network_id for an interface (gateway|subnet fingerprint).
+    /// Get the current network_id for an interface.
+    /// Prefers strong identity from `active_networks` (gateway_mac|subnet_cidr),
+    /// falls back to provisional identity from interface (gateway_ip|subnet_mask).
     pub fn network_id_for(&self, interface: &str) -> String {
         self.state
-            .interfaces
+            .active_networks
             .get(interface)
-            .map(|i| i.network_id())
+            .map(|n| n.id.clone())
+            .or_else(|| {
+                self.state
+                    .interfaces
+                    .get(interface)
+                    .map(|i| i.network_id())
+            })
             .unwrap_or_default()
     }
 
     /// Check if an IPv4 address belongs to a CIDR subnet (e.g. "10.0.0.0/24").
-    fn ipv4_in_cidr(ip: std::net::Ipv4Addr, cidr: &str) -> bool {
+    pub fn ipv4_in_cidr(ip: std::net::Ipv4Addr, cidr: &str) -> bool {
         let Some((net_str, prefix_str)) = cidr.split_once('/') else {
             return false;
         };
@@ -231,6 +239,109 @@ impl StateEngine {
         }
         let mask = u32::MAX << (32 - prefix);
         (u32::from(ip) & mask) == (u32::from(net) & mask)
+    }
+
+    /// Check if an IP address belongs to the subnet of the given interface.
+    /// Returns true (permissive) if we can't determine (IPv6, unknown interface).
+    pub fn is_ip_on_current_network(&self, interface: &str, ip: std::net::IpAddr) -> bool {
+        if let std::net::IpAddr::V4(v4) = ip {
+            if let Some(iface) = self.state.interfaces.get(interface) {
+                if let Some(cidr) = iface.cidr() {
+                    return Self::ipv4_in_cidr(v4, &cidr);
+                }
+            }
+        }
+        true // Allow if we can't determine (IPv6, unknown interface)
+    }
+
+    // ── Gateway MAC resolution ──────────────────────────────────────────
+
+    /// O(1) lookup: resolve the gateway MAC for an interface via the ip_to_mac reverse index.
+    pub fn resolve_gateway_mac(&self, interface: &str) -> Option<String> {
+        let iface = self.state.interfaces.get(interface)?;
+        let gw_ip: std::net::IpAddr = iface.gateway.parse().ok()?;
+        let mac = self.state.ip_to_mac.get(&gw_ip)?;
+        normalize_mac(mac.value())
+    }
+
+    /// Attempt to upgrade a provisional network identity (gateway_ip|subnet_mask)
+    /// to a strong one (gateway_mac|subnet_cidr) when the gateway MAC becomes known.
+    async fn try_upgrade_network_identity(&self, interface: &str) -> anyhow::Result<()> {
+        let Some(gw_mac) = self.resolve_gateway_mac(interface) else {
+            return Ok(());
+        };
+
+        let Some(iface_ref) = self.state.interfaces.get(interface) else {
+            return Ok(());
+        };
+        let iface = iface_ref.clone();
+        drop(iface_ref);
+
+        let subnet_cidr = match iface.cidr() {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let strong_id = format!("{gw_mac}|{subnet_cidr}");
+        let current_id = self.network_id_for(interface);
+
+        // Only upgrade if the current identity is provisional (not already strong).
+        if current_id.is_empty() || current_id == strong_id {
+            return Ok(());
+        }
+
+        // Check if DB already knows this strong-keyed network (we've been here before).
+        let existing_network = self.db.get_network(&strong_id).await?;
+
+        // Migrate in-memory hosts from provisional to strong ID.
+        // Collect keys first to avoid holding DashMap shard locks during mutation.
+        let keys_to_migrate: Vec<String> = self.state.hosts.iter()
+            .filter(|entry| entry.value().network_id == current_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in &keys_to_migrate {
+            if let Some(mut entry) = self.state.hosts.get_mut(key) {
+                entry.value_mut().network_id = strong_id.clone();
+            }
+        }
+
+        // Migrate DB hosts.
+        let migrated = self.db.migrate_hosts_network_id(&current_id, &strong_id).await?;
+        if migrated > 0 {
+            tracing::info!(
+                old_id = %current_id,
+                new_id = %strong_id,
+                hosts_migrated = migrated,
+                "upgraded network identity"
+            );
+        }
+
+        // Update the network record.
+        let now = Utc::now();
+        let net_info = crate::model::NetworkInfo {
+            id: strong_id.clone(),
+            ssid: String::new(),
+            gateway_mac: gw_mac,
+            gateway_ip: iface.gateway.clone(),
+            subnet_cidr,
+            subnet_mask: iface.subnet.clone(),
+            interface: interface.to_string(),
+            times_connected: 1,
+            first_seen: now,
+            last_seen: now,
+        };
+        self.db.upsert_network(&net_info).await?;
+
+        // If we reconnected to a known network, bump the connection counter.
+        if existing_network.is_some() {
+            self.db.bump_network_connection(&strong_id).await?;
+        }
+
+        // Update active_networks map.
+        self.state.active_networks.insert(interface.to_string(), net_info);
+
+        Ok(())
     }
 
     // ── Apply methods ──────────────────────────────────────────────────
@@ -275,6 +386,11 @@ impl StateEngine {
                     existing.hostname.clone_from(&entry.hostname);
                     changed = true;
                 }
+                // ARP confirmation promotes Historical/Stale hosts to Active.
+                if existing.status != crate::model::HostStatus::Active {
+                    existing.status = crate::model::HostStatus::Active;
+                    changed = true;
+                }
                 existing.last_seen = now;
                 let snapshot = existing.clone();
                 drop(existing); // release DashMap lock before async emit/db
@@ -311,6 +427,7 @@ impl StateEngine {
                     fingerprints,
                     interface: entry.interface.clone(),
                     network_id,
+                    status: crate::model::HostStatus::Active,
                     first_seen: now,
                     last_seen: now,
                 };
@@ -322,6 +439,20 @@ impl StateEngine {
                 self.state.insert_host(mac, host.clone());
                 self.emit(Change::HostAdded(host.clone())).await;
                 self.db.upsert_host(&host).await?;
+            }
+        }
+
+        // After processing ARP entries, check if any entry resolved a gateway IP.
+        // If so, attempt to upgrade the network identity from provisional to strong.
+        let interfaces_to_check: Vec<String> = entries
+            .iter()
+            .map(|e| e.interface.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        for iface_name in &interfaces_to_check {
+            if let Err(e) = self.try_upgrade_network_identity(iface_name).await {
+                tracing::warn!(interface = %iface_name, error = %e, "identity upgrade failed");
             }
         }
 
@@ -402,11 +533,12 @@ impl StateEngine {
                 let cleared = self.clear_hosts_on_interface(&iface.name).await?;
 
                 // Create/update the new network record in the DB.
-                // Gateway MAC will be filled in later when ARP collector resolves it.
+                // Try to resolve gateway MAC immediately (may be in ARP cache).
+                let gw_mac = self.resolve_gateway_mac(&iface.name).unwrap_or_default();
                 let net_info = crate::model::NetworkInfo {
                     id: new_net.clone(),
                     ssid: String::new(),
-                    gateway_mac: String::new(),
+                    gateway_mac: gw_mac,
                     gateway_ip: iface.gateway.clone(),
                     subnet_cidr: iface.cidr().unwrap_or_default(),
                     subnet_mask: iface.subnet.clone(),
@@ -419,11 +551,16 @@ impl StateEngine {
                     tracing::warn!(error = %e, "failed to persist network record");
                 }
 
+                // Track active network per interface.
+                self.state.active_networks.insert(iface.name.clone(), net_info);
+
                 // Try to restore hosts from a previously-seen network.
                 let restored = match self.db.hosts_for_network(&new_net).await {
                     Ok(hosts) => {
                         let mut count = 0usize;
-                        for host in hosts {
+                        for mut host in hosts {
+                            // Mark restored hosts as Historical until ARP confirms them.
+                            host.status = crate::model::HostStatus::Historical;
                             if self.state.insert_host(host.mac.clone(), host) {
                                 count += 1;
                             }
@@ -435,6 +572,13 @@ impl StateEngine {
                         0
                     }
                 };
+
+                // If hosts were restored, this is a known network — bump connection counter.
+                if restored > 0 {
+                    if let Err(e) = self.db.bump_network_connection(&new_net).await {
+                        tracing::warn!(error = %e, "failed to bump network connection counter");
+                    }
+                }
 
                 tracing::info!(
                     interface = %iface.name,
@@ -488,6 +632,9 @@ impl StateEngine {
                     iface.is_up = false;
                     let snapshot = iface.clone();
                     drop(iface);
+
+                    // Remove from active networks tracking.
+                    self.state.active_networks.remove(&name);
 
                     // Clear hosts from the downed interface
                     let cleared = self.clear_hosts_on_interface(&name).await?;
@@ -595,6 +742,30 @@ impl StateEngine {
             self.db.remove_wifi(&bssid).await?;
         }
 
+        // SSID enrichment: if a WiFi interface has an active network without SSID,
+        // try to fill it from the strongest WiFi network on that interface.
+        let enrichment_targets: Vec<String> = self.state.active_networks.iter()
+            .filter(|entry| {
+                entry.value().ssid.is_empty()
+                    && self.state.interfaces.get(entry.key())
+                        .map_or(false, |i| i.kind == crate::model::InterfaceKind::Wifi)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for iface_name in enrichment_targets {
+            let best_ssid = networks
+                .iter()
+                .filter(|w| w.interface == iface_name && !w.ssid.is_empty())
+                .max_by_key(|w| w.rssi)
+                .map(|w| w.ssid.clone());
+            if let Some(ssid) = best_ssid {
+                if let Some(mut net) = self.state.active_networks.get_mut(&iface_name) {
+                    net.ssid = ssid;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -614,6 +785,11 @@ impl StateEngine {
             };
 
             if self.state.is_self_mac(&mac) || self.filters.should_exclude_mac(&mac) {
+                continue;
+            }
+
+            // Reject nmap results whose IP is outside the interface's subnet.
+            if !self.is_ip_on_current_network(interface, nmap_host.ip) {
                 continue;
             }
 
@@ -767,6 +943,7 @@ impl StateEngine {
                     fingerprints,
                     interface: interface.to_string(),
                     network_id: self.network_id_for(interface),
+                    status: crate::model::HostStatus::Active,
                     first_seen: now,
                     last_seen: now,
                 };
@@ -785,6 +962,16 @@ impl StateEngine {
         results: &[crate::collector::banner::BannerResult],
     ) -> anyhow::Result<()> {
         for result in results {
+            // Reject banner results for hosts whose IP is outside the current subnet.
+            if let Ok(ip) = result.ip.parse::<std::net::IpAddr>() {
+                // Determine interface from the host if possible.
+                if let Some(host_ref) = self.state.hosts.get(&result.mac) {
+                    if !self.is_ip_on_current_network(&host_ref.interface, ip) {
+                        continue;
+                    }
+                }
+            }
+
             if let Some(mut host) = self.state.hosts.get_mut(&result.mac) {
                 let mut changed = false;
 
@@ -826,16 +1013,33 @@ impl StateEngine {
         }
 
         let cutoff = Utc::now() - ChronoDuration::seconds(ttl_secs as i64);
-        let stale_macs: Vec<String> = self
-            .state
-            .hosts
-            .iter()
-            .filter(|e| e.value().is_stale(cutoff))
-            .map(|e| e.key().clone())
-            .collect();
 
-        let count = stale_macs.len();
-        for mac in &stale_macs {
+        // Two-pass pruning:
+        // 1. Hosts past cutoff that are Active → mark Stale (grace period)
+        // 2. Hosts past cutoff that are already Stale → remove
+        let mut to_remove: Vec<String> = Vec::new();
+        let mut to_mark: Vec<String> = Vec::new();
+
+        for entry in self.state.hosts.iter() {
+            if entry.value().is_stale(cutoff) {
+                if entry.value().status == crate::model::HostStatus::Stale {
+                    to_remove.push(entry.key().clone());
+                } else {
+                    to_mark.push(entry.key().clone());
+                }
+            }
+        }
+
+        // Mark Active/Historical → Stale
+        for mac in &to_mark {
+            if let Some(mut host) = self.state.hosts.get_mut(mac) {
+                host.status = crate::model::HostStatus::Stale;
+            }
+        }
+
+        // Remove already-Stale hosts
+        let count = to_remove.len();
+        for mac in &to_remove {
             if let Some((_, host)) = self.state.hosts.remove(mac) {
                 for addr in &host.addresses {
                     self.state.ip_to_mac.remove(addr);
@@ -845,8 +1049,8 @@ impl StateEngine {
             self.db.remove_host(mac).await?;
         }
 
-        if count > 0 {
-            tracing::info!(count, ttl_secs, "pruned stale hosts");
+        if count > 0 || !to_mark.is_empty() {
+            tracing::info!(removed = count, marked_stale = to_mark.len(), ttl_secs, "pruned stale hosts");
         }
 
         Ok(count)
@@ -956,7 +1160,7 @@ impl StateEngine {
 mod tests {
     use super::*;
     use crate::config::FilterConfig;
-    use crate::model::{InterfaceKind, ServiceInfo};
+    use crate::model::{HostStatus, InterfaceKind, ServiceInfo};
     use crate::traits::mocks::{InMemoryStorage, MockVendorLookup};
     use std::sync::Arc;
 
@@ -1385,7 +1589,8 @@ mod tests {
     #[tokio::test]
     async fn prune_removes_stale_hosts() {
         let engine = make_engine(FilterConfig::default());
-        // Add a host and backdate it
+        // Add a host and backdate it. Two-pass pruning: first prune marks Active→Stale,
+        // second prune removes Stale hosts.
         let host = HostInfo {
             mac: "aa:bb:cc:dd:ee:ff".into(),
             vendor: String::new(),
@@ -1396,6 +1601,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now() - chrono::Duration::hours(48),
             last_seen: Utc::now() - chrono::Duration::hours(25),
         };
@@ -1404,8 +1610,18 @@ mod tests {
             .hosts
             .insert(host.mac.clone(), host.clone());
 
-        let removed = engine.prune_stale_hosts(86400).await.unwrap(); // 24h TTL
-        assert_eq!(removed, 1);
+        // First pass: marks the host as Stale (not removed yet)
+        let removed = engine.prune_stale_hosts(86400).await.unwrap();
+        assert_eq!(removed, 0, "first pass should mark, not remove");
+        assert_eq!(engine.state.hosts.len(), 1);
+        assert_eq!(
+            engine.state.hosts.get("aa:bb:cc:dd:ee:ff").unwrap().status,
+            HostStatus::Stale,
+        );
+
+        // Second pass: removes the now-Stale host
+        let removed = engine.prune_stale_hosts(86400).await.unwrap();
+        assert_eq!(removed, 1, "second pass should remove Stale host");
         assert_eq!(engine.state.hosts.len(), 0);
     }
 
@@ -1422,6 +1638,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now(),
             last_seen: Utc::now(),
         };
@@ -1653,6 +1870,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: "10.20.223.1|255.255.255.0".into(),
+            status: HostStatus::default(),
             first_seen: now,
             last_seen: now,
         };
@@ -1679,6 +1897,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: "192.168.1.1|255.255.255.0".into(),
+            status: HostStatus::default(),
             first_seen: now,
             last_seen: now,
         };
@@ -1715,6 +1934,7 @@ mod tests {
                 fingerprints: vec![],
                 interface: "en0".into(),
                 network_id: "10.0.0.1|255.255.255.0".into(),
+                status: HostStatus::default(),
                 first_seen: now,
                 last_seen: now,
             },
@@ -2033,6 +2253,7 @@ mod tests {
             fingerprints: vec![],
             interface: "en0".into(),
             network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now(),
             last_seen: Utc::now(),
         };
@@ -2218,12 +2439,15 @@ mod tests {
             hostname: None, os_hint: None,
             services: vec![], fingerprints: vec![],
             interface: "en0".into(), network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now() - chrono::Duration::hours(48),
             last_seen: Utc::now() - chrono::Duration::hours(25),
         };
         engine.state.insert_host(host.mac.clone(), host);
         engine.state.ip_to_mac.insert("10.0.0.1".parse().unwrap(), "aa:bb:cc:dd:ee:ff".into());
 
+        // Two-pass: first marks Stale, second removes
+        engine.prune_stale_hosts(86400).await.unwrap();
         engine.prune_stale_hosts(86400).await.unwrap();
 
         // IP index should be cleaned
@@ -2335,6 +2559,7 @@ mod tests {
                 },
             ],
             interface: "en0".into(), network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now(), last_seen: Utc::now(),
         };
         assert!(promote_fingerprints(&mut host));
@@ -2354,6 +2579,7 @@ mod tests {
                 },
             ],
             interface: "en0".into(), network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now(), last_seen: Utc::now(),
         };
         assert!(promote_fingerprints(&mut host));
@@ -2367,6 +2593,7 @@ mod tests {
             addresses: vec![], hostname: None, os_hint: None,
             services: vec![], fingerprints: vec![],
             interface: "en0".into(), network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now(), last_seen: Utc::now(),
         };
         assert!(!promote_fingerprints(&mut host));
@@ -2390,10 +2617,506 @@ mod tests {
                 },
             ],
             interface: "en0".into(), network_id: String::new(),
+            status: HostStatus::default(),
             first_seen: Utc::now(), last_seen: Utc::now(),
         };
         promote_fingerprints(&mut host);
         // mDNS (0.95) wins over NetBIOS (0.90)
         assert_eq!(host.hostname.as_deref(), Some("device.local"));
+    }
+
+    // ── Phase 1: Gateway MAC Resolution + Identity Upgrade ────────────
+
+    #[test]
+    fn resolve_gateway_mac_found() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Set up interface with a gateway
+        let mut if0 = iface("en0", true);
+        if0.gateway = "10.0.0.1".into();
+        engine.state.interfaces.insert("en0".into(), if0);
+
+        // Add gateway IP → MAC mapping (simulates ARP having resolved the gateway)
+        engine.state.ip_to_mac.insert(
+            "10.0.0.1".parse().unwrap(),
+            "aa:bb:cc:dd:ee:ff".into(),
+        );
+
+        let mac = engine.resolve_gateway_mac("en0");
+        assert_eq!(mac.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+    }
+
+    #[test]
+    fn resolve_gateway_mac_not_yet_available() {
+        let engine = make_engine(FilterConfig::default());
+
+        let mut if0 = iface("en0", true);
+        if0.gateway = "10.0.0.1".into();
+        engine.state.interfaces.insert("en0".into(), if0);
+
+        // No ARP entry for the gateway yet
+        let mac = engine.resolve_gateway_mac("en0");
+        assert!(mac.is_none(), "should return None when gateway MAC not resolved");
+    }
+
+    #[tokio::test]
+    async fn identity_upgrade_provisional_to_strong() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Set up interface
+        let mut if0 = iface("en0", true);
+        if0.gateway = "10.0.0.1".into();
+        if0.subnet = "255.255.255.0".into();
+        if0.ipv4 = vec!["10.0.0.10".parse().unwrap()];
+        engine.apply_interface_state(&[if0]).await.unwrap();
+
+        // Add a host on the provisional network
+        engine
+            .apply_arp_results(&[arp_entry("ba:cc:dd:ee:ff:00", "10.0.0.5", "en0")])
+            .await
+            .unwrap();
+
+        {
+            let host = engine.state.hosts.get("ba:cc:dd:ee:ff:00").unwrap();
+            assert_eq!(host.network_id, "10.0.0.1|255.255.255.0", "should start provisional");
+        } // DashMap Ref dropped before await
+
+        // Now ARP resolves the gateway MAC
+        engine
+            .apply_arp_results(&[arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.1", "en0")])
+            .await
+            .unwrap();
+
+        // The host's network_id should now be upgraded to strong identity
+        let host = engine.state.hosts.get("ba:cc:dd:ee:ff:00").unwrap();
+        assert_eq!(
+            host.network_id, "aa:bb:cc:dd:ee:ff|10.0.0.0/24",
+            "should be upgraded to gateway_mac|subnet_cidr"
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_upgrade_preserves_hosts() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Set up interface
+        let mut if0 = iface("en0", true);
+        if0.gateway = "10.0.0.1".into();
+        if0.subnet = "255.255.255.0".into();
+        if0.ipv4 = vec!["10.0.0.10".parse().unwrap()];
+        engine.apply_interface_state(&[if0]).await.unwrap();
+
+        // Add multiple hosts
+        engine
+            .apply_arp_results(&[
+                arp_entry("ba:cc:dd:ee:ff:00", "10.0.0.5", "en0"),
+                arp_entry("ca:dd:ee:ff:00:00", "10.0.0.6", "en0"),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(engine.state.hosts.len(), 2);
+
+        // Resolve gateway MAC
+        engine
+            .apply_arp_results(&[arp_entry("aa:bb:cc:dd:ee:ff", "10.0.0.1", "en0")])
+            .await
+            .unwrap();
+
+        // All hosts should still be present with upgraded network_id
+        // (The gateway itself is also a host, so 3 total)
+        assert!(engine.state.hosts.get("ba:cc:dd:ee:ff:00").is_some());
+        assert!(engine.state.hosts.get("ca:dd:ee:ff:00:00").is_some());
+
+        let h1 = engine.state.hosts.get("ba:cc:dd:ee:ff:00").unwrap();
+        let h2 = engine.state.hosts.get("ca:dd:ee:ff:00:00").unwrap();
+        assert_eq!(h1.network_id, "aa:bb:cc:dd:ee:ff|10.0.0.0/24");
+        assert_eq!(h2.network_id, "aa:bb:cc:dd:ee:ff|10.0.0.0/24");
+    }
+
+    #[tokio::test]
+    async fn migrate_hosts_network_id_bulk() {
+        let storage = InMemoryStorage::new();
+        use crate::traits::StorageBackend;
+
+        // Insert hosts with old network_id
+        let now = Utc::now();
+        for i in 1..=3 {
+            let host = HostInfo {
+                mac: format!("aa:bb:cc:dd:ee:{i:02x}"),
+                vendor: String::new(),
+                addresses: vec![],
+                hostname: None,
+                os_hint: None,
+                services: vec![],
+                fingerprints: vec![],
+                interface: "en0".into(),
+                network_id: "old_net".into(),
+                status: HostStatus::default(),
+                first_seen: now,
+                last_seen: now,
+            };
+            storage.upsert_host(&host).await.unwrap();
+        }
+
+        let migrated = storage
+            .migrate_hosts_network_id("old_net", "new_net")
+            .await
+            .unwrap();
+        assert_eq!(migrated, 3);
+
+        let remaining = storage.hosts_for_network("old_net").await.unwrap();
+        assert!(remaining.is_empty(), "no hosts should remain on old network");
+
+        let moved = storage.hosts_for_network("new_net").await.unwrap();
+        assert_eq!(moved.len(), 3, "all hosts should be on new network");
+    }
+
+    // ── Phase 2: Per-Interface Network Tracking ────────────────────────
+
+    #[tokio::test]
+    async fn active_networks_populated_on_transition() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Set up initial interface
+        let mut if_a = iface("en0", true);
+        if_a.gateway = "10.0.0.1".into();
+        if_a.subnet = "255.255.255.0".into();
+        engine.apply_interface_state(&[if_a]).await.unwrap();
+
+        // Transition to a different network
+        let mut if_b = iface("en0", true);
+        if_b.gateway = "192.168.1.1".into();
+        if_b.subnet = "255.255.255.0".into();
+        if_b.ipv4 = vec!["192.168.1.10".parse().unwrap()];
+        engine.apply_interface_state(&[if_b]).await.unwrap();
+
+        assert!(
+            engine.state.active_networks.get("en0").is_some(),
+            "active_networks should track the current network"
+        );
+        let net = engine.state.active_networks.get("en0").unwrap();
+        assert_eq!(net.gateway_ip, "192.168.1.1");
+    }
+
+    #[tokio::test]
+    async fn active_networks_cleared_on_disconnect() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Set up and then transition to populate active_networks
+        let mut if_a = iface("en0", true);
+        if_a.gateway = "10.0.0.1".into();
+        if_a.subnet = "255.255.255.0".into();
+        engine.apply_interface_state(&[if_a]).await.unwrap();
+
+        let mut if_b = iface("en0", true);
+        if_b.gateway = "192.168.1.1".into();
+        if_b.subnet = "255.255.255.0".into();
+        if_b.ipv4 = vec!["192.168.1.10".parse().unwrap()];
+        engine.apply_interface_state(&[if_b]).await.unwrap();
+
+        assert!(engine.state.active_networks.get("en0").is_some());
+
+        // Interface goes down
+        engine.apply_interface_state(&[]).await.unwrap();
+
+        assert!(
+            engine.state.active_networks.get("en0").is_none(),
+            "active_networks should be cleared on interface down"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_interface_independent_tracking() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Set up WiFi interface
+        let mut en0 = iface("en0", true);
+        en0.gateway = "10.0.0.1".into();
+        en0.subnet = "255.255.255.0".into();
+        en0.ipv4 = vec!["10.0.0.10".parse().unwrap()];
+        engine.apply_interface_state(&[en0.clone()]).await.unwrap();
+
+        // Transition WiFi to a new network
+        let mut en0_new = iface("en0", true);
+        en0_new.gateway = "192.168.1.1".into();
+        en0_new.subnet = "255.255.255.0".into();
+        en0_new.ipv4 = vec!["192.168.1.10".parse().unwrap()];
+
+        // Set up Ethernet
+        let mut en4 = iface("en4", true);
+        en4.gateway = "172.16.0.1".into();
+        en4.subnet = "255.255.0.0".into();
+        en4.ipv4 = vec!["172.16.0.10".parse().unwrap()];
+        en4.kind = InterfaceKind::Ethernet;
+
+        engine.apply_interface_state(&[en0_new, en4]).await.unwrap();
+
+        // Both should be tracked independently
+        let wifi_net = engine.state.active_networks.get("en0");
+        assert!(wifi_net.is_some(), "WiFi network should be tracked");
+        assert_eq!(wifi_net.unwrap().gateway_ip, "192.168.1.1");
+    }
+
+    // ── Phase 3: Subnet Awareness ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn nmap_rejects_out_of_subnet() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Set up interface on 10.0.0.0/24
+        let mut if0 = iface("en0", true);
+        if0.gateway = "10.0.0.1".into();
+        if0.subnet = "255.255.255.0".into();
+        if0.ipv4 = vec!["10.0.0.10".parse().unwrap()];
+        engine.apply_interface_state(&[if0]).await.unwrap();
+
+        // nmap result with IP outside the subnet
+        let nmap_host = NmapHost {
+            ip: "192.168.1.50".parse().unwrap(),
+            mac: Some("ba:cc:dd:ee:ff:00".into()),
+            hostname: None,
+            os_hint: None,
+            services: vec![],
+        };
+        engine.apply_nmap_results("en0", &[nmap_host]).await.unwrap();
+
+        assert_eq!(
+            engine.state.hosts.len(), 0,
+            "nmap result with out-of-subnet IP should be rejected"
+        );
+    }
+
+    #[test]
+    fn is_ip_on_current_network_ipv4_match() {
+        let engine = make_engine(FilterConfig::default());
+
+        let mut if0 = iface("en0", true);
+        if0.gateway = "10.0.0.1".into();
+        if0.subnet = "255.255.255.0".into();
+        if0.ipv4 = vec!["10.0.0.10".parse().unwrap()];
+        engine.state.interfaces.insert("en0".into(), if0);
+
+        assert!(engine.is_ip_on_current_network("en0", "10.0.0.50".parse().unwrap()));
+        assert!(!engine.is_ip_on_current_network("en0", "192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_ip_on_current_network_unknown_interface_allows() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Unknown interface — should allow (permissive)
+        assert!(engine.is_ip_on_current_network("en99", "10.0.0.1".parse().unwrap()));
+    }
+
+    // ── Phase 4: SSID Enrichment ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn ssid_enrichment_from_wifi_scan() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Set up WiFi interface and trigger a network transition to populate active_networks
+        let mut if_a = iface("en0", true);
+        if_a.gateway = "10.0.0.1".into();
+        if_a.subnet = "255.255.255.0".into();
+        engine.apply_interface_state(&[if_a]).await.unwrap();
+
+        let mut if_b = iface("en0", true);
+        if_b.gateway = "192.168.1.1".into();
+        if_b.subnet = "255.255.255.0".into();
+        if_b.ipv4 = vec!["192.168.1.10".parse().unwrap()];
+        engine.apply_interface_state(&[if_b]).await.unwrap();
+
+        // Verify active_network has no SSID yet
+        let net = engine.state.active_networks.get("en0").unwrap();
+        assert!(net.ssid.is_empty());
+        drop(net);
+
+        // WiFi scan provides SSID
+        let wifi = WifiInfo {
+            ssid: "HomeNetwork".into(),
+            bssid: "10:22:33:44:55:66".into(),
+            rssi: -55,
+            noise: -90,
+            channel: 36,
+            band: "5GHz".into(),
+            security: "WPA3".into(),
+            interface: "en0".into(),
+        };
+        engine.apply_wifi_scan(&[wifi]).await.unwrap();
+
+        let net = engine.state.active_networks.get("en0").unwrap();
+        assert_eq!(net.ssid, "HomeNetwork", "SSID should be enriched from WiFi scan");
+    }
+
+    // ── Phase 5: HostStatus ──────────────────────────────────────────
+
+    #[test]
+    fn host_status_defaults_to_active() {
+        let host = HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: String::new(),
+            addresses: vec![],
+            hostname: None,
+            os_hint: None,
+            services: vec![],
+            fingerprints: vec![],
+            interface: "en0".into(),
+            network_id: String::new(),
+            status: HostStatus::default(),
+            first_seen: Utc::now(),
+            last_seen: Utc::now(),
+        };
+        assert_eq!(host.status, HostStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn restored_hosts_are_historical() {
+        let storage = Arc::new(InMemoryStorage::new());
+        use crate::traits::StorageBackend;
+
+        // Pre-populate storage with hosts from a known network
+        let now = Utc::now();
+        let host = HostInfo {
+            mac: "ba:cc:dd:ee:ff:00".into(),
+            vendor: String::new(),
+            addresses: vec!["192.168.1.50".parse().unwrap()],
+            hostname: None,
+            os_hint: None,
+            services: vec![],
+            fingerprints: vec![],
+            interface: "en0".into(),
+            network_id: "192.168.1.1|255.255.255.0".into(),
+            status: HostStatus::Active,
+            first_seen: now,
+            last_seen: now,
+        };
+        storage.upsert_host(&host).await.unwrap();
+
+        let engine = StateEngine::with_mocks(
+            storage,
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+
+        // Set up initial interface on a different network
+        let mut if_a = iface("en0", true);
+        if_a.gateway = "10.0.0.1".into();
+        if_a.subnet = "255.255.255.0".into();
+        engine.apply_interface_state(&[if_a]).await.unwrap();
+
+        // Transition to the network where hosts are stored
+        let mut if_b = iface("en0", true);
+        if_b.gateway = "192.168.1.1".into();
+        if_b.subnet = "255.255.255.0".into();
+        if_b.ipv4 = vec!["192.168.1.10".parse().unwrap()];
+        engine.apply_interface_state(&[if_b]).await.unwrap();
+
+        // Restored host should be Historical
+        let restored = engine.state.hosts.get("ba:cc:dd:ee:ff:00");
+        assert!(restored.is_some(), "host should be restored from DB");
+        assert_eq!(
+            restored.unwrap().status,
+            HostStatus::Historical,
+            "restored hosts should be Historical"
+        );
+    }
+
+    #[tokio::test]
+    async fn arp_confirms_historical_to_active() {
+        let storage = Arc::new(InMemoryStorage::new());
+        use crate::traits::StorageBackend;
+
+        // Pre-populate with a host
+        let now = Utc::now();
+        let host = HostInfo {
+            mac: "ba:cc:dd:ee:ff:00".into(),
+            vendor: String::new(),
+            addresses: vec!["192.168.1.50".parse().unwrap()],
+            hostname: None,
+            os_hint: None,
+            services: vec![],
+            fingerprints: vec![],
+            interface: "en0".into(),
+            network_id: "192.168.1.1|255.255.255.0".into(),
+            status: HostStatus::Active,
+            first_seen: now,
+            last_seen: now,
+        };
+        storage.upsert_host(&host).await.unwrap();
+
+        let engine = StateEngine::with_mocks(
+            storage,
+            Arc::new(MockVendorLookup::empty()),
+            FilterConfig::default(),
+            100,
+        );
+
+        // Set up initial interface then transition to restore hosts
+        let mut if_a = iface("en0", true);
+        if_a.gateway = "10.0.0.1".into();
+        if_a.subnet = "255.255.255.0".into();
+        engine.apply_interface_state(&[if_a]).await.unwrap();
+
+        let mut if_b = iface("en0", true);
+        if_b.gateway = "192.168.1.1".into();
+        if_b.subnet = "255.255.255.0".into();
+        if_b.ipv4 = vec!["192.168.1.10".parse().unwrap()];
+        engine.apply_interface_state(&[if_b]).await.unwrap();
+
+        // Verify it's Historical
+        let h = engine.state.hosts.get("ba:cc:dd:ee:ff:00").unwrap();
+        assert_eq!(h.status, HostStatus::Historical);
+        drop(h);
+
+        // ARP confirms the host
+        engine
+            .apply_arp_results(&[arp_entry("ba:cc:dd:ee:ff:00", "192.168.1.50", "en0")])
+            .await
+            .unwrap();
+
+        let h = engine.state.hosts.get("ba:cc:dd:ee:ff:00").unwrap();
+        assert_eq!(
+            h.status,
+            HostStatus::Active,
+            "ARP should promote Historical to Active"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_hosts_marked_not_removed() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Add a host and backdate it past TTL
+        let host = HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: String::new(),
+            addresses: vec!["10.0.0.1".parse().unwrap()],
+            hostname: None,
+            os_hint: None,
+            services: vec![],
+            fingerprints: vec![],
+            interface: "en0".into(),
+            network_id: String::new(),
+            status: HostStatus::Active,
+            first_seen: Utc::now() - chrono::Duration::hours(48),
+            last_seen: Utc::now() - chrono::Duration::hours(25),
+        };
+        engine.state.hosts.insert(host.mac.clone(), host);
+
+        // First prune: should mark as Stale, not remove
+        let removed = engine.prune_stale_hosts(86400).await.unwrap();
+        assert_eq!(removed, 0, "first prune should not remove");
+        assert_eq!(engine.state.hosts.len(), 1, "host should still be present");
+        assert_eq!(
+            engine.state.hosts.get("aa:bb:cc:dd:ee:ff").unwrap().status,
+            HostStatus::Stale,
+            "host should be marked Stale"
+        );
+
+        // Second prune: now removes the Stale host
+        let removed = engine.prune_stale_hosts(86400).await.unwrap();
+        assert_eq!(removed, 1, "second prune should remove Stale host");
+        assert_eq!(engine.state.hosts.len(), 0);
     }
 }

@@ -377,6 +377,20 @@ impl Database {
         Ok(())
     }
 
+    /// Bulk-update all hosts from one network_id to another.
+    pub async fn migrate_hosts_network_id(&self, old_id: &str, new_id: &str) -> anyhow::Result<u64> {
+        let result = sea_orm::ConnectionTrait::execute(
+            &self.conn,
+            sea_orm::Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Sqlite,
+                "UPDATE hosts SET network_id = $1 WHERE network_id = $2",
+                [new_id.into(), old_id.into()],
+            ),
+        )
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn all_networks(&self) -> anyhow::Result<Vec<NetworkInfo>> {
         let rows = entity::network::Entity::find().all(&self.conn).await?;
         Ok(rows.into_iter().map(row_to_network_info).collect())
@@ -562,6 +576,7 @@ fn row_to_host_info(
         fingerprints: Vec::new(),
         interface: row.interface.clone(),
         network_id: row.network_id.clone(),
+        status: crate::model::HostStatus::default(),
         first_seen: row.first_seen.with_timezone(&Utc),
         last_seen: row.last_seen.with_timezone(&Utc),
     }
@@ -682,6 +697,18 @@ impl StorageBackend for Database {
 
     async fn hosts_for_network(&self, network_id: &str) -> anyhow::Result<Vec<HostInfo>> {
         self.hosts_for_network(network_id).await
+    }
+
+    async fn migrate_hosts_network_id(&self, old_id: &str, new_id: &str) -> anyhow::Result<u64> {
+        self.migrate_hosts_network_id(old_id, new_id).await
+    }
+
+    async fn bump_network_connection(&self, network_id: &str) -> anyhow::Result<()> {
+        self.bump_network_connection(network_id).await
+    }
+
+    async fn get_network(&self, id: &str) -> anyhow::Result<Option<NetworkInfo>> {
+        self.get_network(id).await
     }
 }
 
@@ -838,6 +865,7 @@ mod tests {
             }],
             interface: "en0".into(),
             network_id: "10.0.0.1|255.255.255.0".into(),
+            status: crate::model::HostStatus::default(),
             first_seen: Utc::now(),
             last_seen: Utc::now(),
         };
