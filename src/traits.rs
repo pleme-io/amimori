@@ -170,6 +170,13 @@ pub trait StorageBackend: Send + Sync {
     async fn bump_network_connection(&self, network_id: &str) -> anyhow::Result<()>;
     async fn get_network(&self, id: &str) -> anyhow::Result<Option<NetworkInfo>>;
     async fn all_networks(&self) -> anyhow::Result<Vec<NetworkInfo>>;
+    // Maintenance
+    async fn reset_all(&self) -> anyhow::Result<u64>;
+    async fn delete_network(&self, network_id: &str) -> anyhow::Result<u64>;
+    async fn purge_stale_hosts(&self) -> anyhow::Result<u64>;
+    async fn purge_all_events(&self) -> anyhow::Result<u64>;
+    async fn vacuum(&self) -> anyhow::Result<()>;
+    async fn table_counts(&self) -> anyhow::Result<(u32, u32, u32, u32, u32, u32)>;
 }
 
 // ── Gateway / DNS providers ────────────────────────────────────────────────
@@ -391,6 +398,47 @@ pub mod mocks {
 
         async fn all_networks(&self) -> anyhow::Result<Vec<NetworkInfo>> {
             Ok(vec![]) // no-op for tests
+        }
+
+        async fn reset_all(&self) -> anyhow::Result<u64> {
+            let count = self.hosts.lock().unwrap().len() as u64;
+            self.hosts.lock().unwrap().clear();
+            self.interfaces.lock().unwrap().clear();
+            self.wifi.lock().unwrap().clear();
+            Ok(count)
+        }
+
+        async fn delete_network(&self, network_id: &str) -> anyhow::Result<u64> {
+            let mut hosts = self.hosts.lock().unwrap();
+            let before = hosts.len();
+            hosts.retain(|_, h| h.network_id != network_id);
+            Ok((before - hosts.len()) as u64)
+        }
+
+        async fn purge_stale_hosts(&self) -> anyhow::Result<u64> {
+            let mut hosts = self.hosts.lock().unwrap();
+            let before = hosts.len();
+            hosts.retain(|_, h| h.status != crate::model::HostStatus::Stale);
+            Ok((before - hosts.len()) as u64)
+        }
+
+        async fn purge_all_events(&self) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+
+        async fn vacuum(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn table_counts(&self) -> anyhow::Result<(u32, u32, u32, u32, u32, u32)> {
+            Ok((
+                0, // networks
+                self.hosts.lock().unwrap().len() as u32,
+                0, // services
+                0, // events
+                self.interfaces.lock().unwrap().len() as u32,
+                self.wifi.lock().unwrap().len() as u32,
+            ))
         }
     }
 

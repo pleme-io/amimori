@@ -114,6 +114,34 @@ enum Cli {
         #[arg(long, default_value = "20")]
         limit: u32,
     },
+    /// Database maintenance commands
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum DbAction {
+    /// Show database statistics
+    Stats,
+    /// Delete ALL data and reset
+    Reset,
+    /// Delete a specific network and its hosts
+    DeleteNetwork {
+        /// Network ID to delete
+        network_id: String,
+    },
+    /// Remove stale hosts
+    PurgeStale,
+    /// Remove event history
+    PurgeEvents {
+        /// Delete events older than N seconds (0 = all)
+        #[arg(long, default_value = "0")]
+        older_than: u64,
+    },
+    /// Compact database (VACUUM)
+    Vacuum,
 }
 
 impl Default for Cli {
@@ -429,6 +457,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => "other".into(),
                     };
                     println!("  [{:>6}] {desc}", e.sequence);
+                }
+            }
+        }
+        Cli::Db { action } => {
+            let mut client = grpc_client().await;
+            match action {
+                DbAction::Stats => {
+                    let resp = client.db_stats(grpc::proto::Empty {}).await?;
+                    let s = resp.into_inner();
+                    println!("Database Statistics\n");
+                    println!("  networks:      {}", s.total_networks);
+                    println!("  hosts:         {}", s.total_hosts);
+                    println!("  services:      {}", s.total_services);
+                    println!("  events:        {}", s.total_events);
+                    println!("  interfaces:    {}", s.total_interfaces);
+                    println!("  wifi networks: {}", s.total_wifi_networks);
+                }
+                DbAction::Reset => {
+                    let resp = client.db_reset(grpc::proto::Empty {}).await?;
+                    let r = resp.into_inner();
+                    println!("{}", r.message);
+                }
+                DbAction::DeleteNetwork { network_id } => {
+                    let resp = client.db_delete_network(grpc::proto::NetworkHostsRequest {
+                        network_id,
+                    }).await?;
+                    let r = resp.into_inner();
+                    println!("{}", r.message);
+                }
+                DbAction::PurgeStale => {
+                    let resp = client.db_purge_stale_hosts(grpc::proto::Empty {}).await?;
+                    let r = resp.into_inner();
+                    println!("{}", r.message);
+                }
+                DbAction::PurgeEvents { older_than } => {
+                    let resp = client.db_purge_events(grpc::proto::PurgeEventsRequest {
+                        older_than_secs: older_than,
+                    }).await?;
+                    let r = resp.into_inner();
+                    println!("{}", r.message);
+                }
+                DbAction::Vacuum => {
+                    let resp = client.db_vacuum(grpc::proto::Empty {}).await?;
+                    let r = resp.into_inner();
+                    println!("{}", r.message);
                 }
             }
         }

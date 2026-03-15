@@ -8,7 +8,7 @@ use chrono::Utc;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, Database as SeaDatabase, DatabaseConnection,
-    EntityTrait, QueryFilter,
+    EntityTrait, PaginatorTrait, QueryFilter,
 };
 use sea_orm_migration::MigratorTrait;
 
@@ -484,6 +484,102 @@ impl Database {
             .await?;
         Ok(result.rows_affected)
     }
+
+    // ── Database maintenance ──────────────────────────────────────────
+
+    /// Get the database file path.
+    pub fn db_path(&self) -> &str {
+        // Extract from connection URL — not stored separately, so return empty
+        // (the caller knows the path from config).
+        ""
+    }
+
+    /// Count rows in each table.
+    pub async fn table_counts(&self) -> anyhow::Result<DbCounts> {
+        let hosts = entity::host::Entity::find().count(&self.conn).await? as u32;
+        let services = entity::service::Entity::find().count(&self.conn).await? as u32;
+        let events = entity::event::Entity::find().count(&self.conn).await? as u32;
+        let interfaces = entity::interface::Entity::find().count(&self.conn).await? as u32;
+        let wifi = entity::wifi_network::Entity::find().count(&self.conn).await? as u32;
+        let networks = entity::network::Entity::find().count(&self.conn).await? as u32;
+        Ok(DbCounts { hosts, services, events, interfaces, wifi, networks })
+    }
+
+    /// Delete ALL data from all tables. Returns total rows deleted.
+    pub async fn reset_all(&self) -> anyhow::Result<u64> {
+        let mut total = 0u64;
+        total += entity::service::Entity::delete_many().exec(&self.conn).await?.rows_affected;
+        total += entity::host::Entity::delete_many().exec(&self.conn).await?.rows_affected;
+        total += entity::event::Entity::delete_many().exec(&self.conn).await?.rows_affected;
+        total += entity::wifi_network::Entity::delete_many().exec(&self.conn).await?.rows_affected;
+        total += entity::interface::Entity::delete_many().exec(&self.conn).await?.rows_affected;
+        total += entity::network::Entity::delete_many().exec(&self.conn).await?.rows_affected;
+        Ok(total)
+    }
+
+    /// Delete a specific network and all its hosts/services.
+    pub async fn delete_network(&self, network_id: &str) -> anyhow::Result<u64> {
+        let mut total = 0u64;
+        // Find hosts on this network, delete their services first
+        let hosts = entity::host::Entity::find()
+            .filter(entity::host::Column::NetworkId.eq(network_id))
+            .all(&self.conn)
+            .await?;
+        for host in &hosts {
+            total += entity::service::Entity::delete_many()
+                .filter(entity::service::Column::HostMac.eq(&host.mac))
+                .exec(&self.conn)
+                .await?
+                .rows_affected;
+        }
+        total += entity::host::Entity::delete_many()
+            .filter(entity::host::Column::NetworkId.eq(network_id))
+            .exec(&self.conn)
+            .await?
+            .rows_affected;
+        // Delete the network record itself
+        let _ = entity::network::Entity::delete_by_id(network_id)
+            .exec(&self.conn)
+            .await;
+        total += 1;
+        Ok(total)
+    }
+
+    /// Delete all hosts marked stale (not seen recently). Returns rows deleted.
+    pub async fn purge_stale_hosts(&self) -> anyhow::Result<u64> {
+        // Stale hosts have status="stale" in their document_json.
+        // Since status isn't a relational column, we use raw SQL.
+        let result = sea_orm::ConnectionTrait::execute_unprepared(
+            &self.conn,
+            "DELETE FROM hosts WHERE json_extract(document_json, '$.status') = 'stale'",
+        )
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Delete all events. Returns rows deleted.
+    pub async fn purge_all_events(&self) -> anyhow::Result<u64> {
+        let result = entity::event::Entity::delete_many()
+            .exec(&self.conn)
+            .await?;
+        Ok(result.rows_affected)
+    }
+
+    /// Run VACUUM to reclaim disk space.
+    pub async fn vacuum(&self) -> anyhow::Result<()> {
+        sea_orm::ConnectionTrait::execute_unprepared(&self.conn, "VACUUM").await?;
+        Ok(())
+    }
+}
+
+/// Row counts for database statistics.
+pub struct DbCounts {
+    pub hosts: u32,
+    pub services: u32,
+    pub events: u32,
+    pub interfaces: u32,
+    pub wifi: u32,
+    pub networks: u32,
 }
 
 /// Extract event classification from a Change for indexed querying.
@@ -713,6 +809,31 @@ impl StorageBackend for Database {
 
     async fn all_networks(&self) -> anyhow::Result<Vec<NetworkInfo>> {
         self.all_networks().await
+    }
+
+    async fn reset_all(&self) -> anyhow::Result<u64> {
+        self.reset_all().await
+    }
+
+    async fn delete_network(&self, network_id: &str) -> anyhow::Result<u64> {
+        self.delete_network(network_id).await
+    }
+
+    async fn purge_stale_hosts(&self) -> anyhow::Result<u64> {
+        self.purge_stale_hosts().await
+    }
+
+    async fn purge_all_events(&self) -> anyhow::Result<u64> {
+        self.purge_all_events().await
+    }
+
+    async fn vacuum(&self) -> anyhow::Result<()> {
+        self.vacuum().await
+    }
+
+    async fn table_counts(&self) -> anyhow::Result<(u32, u32, u32, u32, u32, u32)> {
+        let c = self.table_counts().await?;
+        Ok((c.networks, c.hosts, c.services, c.events, c.interfaces, c.wifi))
     }
 }
 

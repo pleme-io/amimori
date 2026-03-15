@@ -83,6 +83,12 @@ struct NetworkHostsInput {
     network_id: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct PurgeEventsInput {
+    #[schemars(description = "Delete events older than this many seconds (0 = delete all events)")]
+    older_than_secs: Option<u64>,
+}
+
 // ── MCP Server ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -394,6 +400,92 @@ impl AmimoriMcp {
                         h.mac, name, h.status, h.ipv4);
                 }
                 out
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    // ── Database maintenance tools ────────────────────────────────────
+
+    #[tool(description = "Show database statistics — row counts for all tables")]
+    async fn db_stats(&self, Parameters(_): Parameters<EmptyInput>) -> String {
+        let mut client = self.client();
+        match client.db_stats(proto::Empty {}).await {
+            Ok(resp) => {
+                let s = resp.into_inner();
+                let mut out = String::new();
+                let _ = writeln!(out, "Database Statistics\n");
+                let _ = writeln!(out, "  networks:      {}", s.total_networks);
+                let _ = writeln!(out, "  hosts:         {}", s.total_hosts);
+                let _ = writeln!(out, "  services:      {}", s.total_services);
+                let _ = writeln!(out, "  events:        {}", s.total_events);
+                let _ = writeln!(out, "  interfaces:    {}", s.total_interfaces);
+                let _ = writeln!(out, "  wifi networks: {}", s.total_wifi_networks);
+                out
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "Reset the entire database — delete ALL data from all tables and clear in-memory state")]
+    async fn db_reset(&self, Parameters(_): Parameters<EmptyInput>) -> String {
+        let mut client = self.client();
+        match client.db_reset(proto::Empty {}).await {
+            Ok(resp) => {
+                let r = resp.into_inner();
+                format!("{}: {}", r.action, r.message)
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "Delete a specific network and all its hosts from the database")]
+    async fn db_delete_network(&self, Parameters(input): Parameters<NetworkHostsInput>) -> String {
+        let mut client = self.client();
+        match client.db_delete_network(proto::NetworkHostsRequest {
+            network_id: input.network_id.clone(),
+        }).await {
+            Ok(resp) => {
+                let r = resp.into_inner();
+                format!("{}: {}", r.action, r.message)
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "Purge all hosts marked as stale from the database")]
+    async fn db_purge_stale(&self, Parameters(_): Parameters<EmptyInput>) -> String {
+        let mut client = self.client();
+        match client.db_purge_stale_hosts(proto::Empty {}).await {
+            Ok(resp) => {
+                let r = resp.into_inner();
+                format!("{}: {}", r.action, r.message)
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "Purge event history — delete events older than N seconds (0 = all)")]
+    async fn db_purge_events(&self, Parameters(input): Parameters<PurgeEventsInput>) -> String {
+        let mut client = self.client();
+        match client.db_purge_events(proto::PurgeEventsRequest {
+            older_than_secs: input.older_than_secs.unwrap_or(0),
+        }).await {
+            Ok(resp) => {
+                let r = resp.into_inner();
+                format!("{}: {}", r.action, r.message)
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "Compact the database — reclaim disk space after deletions")]
+    async fn db_vacuum(&self, Parameters(_): Parameters<EmptyInput>) -> String {
+        let mut client = self.client();
+        match client.db_vacuum(proto::Empty {}).await {
+            Ok(resp) => {
+                let r = resp.into_inner();
+                format!("{}: {}", r.action, r.message)
             }
             Err(e) => format!("error: {e}"),
         }

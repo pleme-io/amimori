@@ -20,6 +20,7 @@ use proto::{
     ChangesRequest, ChangesResponse, DeltaUpdate, Empty, Host, HostRequest, InterfaceList,
     NetworkInterface, NetworkSnapshot, Service, ServiceChange, SnapshotRequest, SubscribeRequest,
     WifiNetwork, WifiNetworkList, NetworkList, NetworkRecord, NetworkHostsRequest,
+    DbStatsResponse, DbMaintenanceResponse, PurgeEventsRequest,
 };
 
 struct ProfilerService {
@@ -253,6 +254,99 @@ impl NetworkProfiler for ProfilerService {
             wifi_networks: vec![],
             sequence: self.engine.state.sequence.load(std::sync::atomic::Ordering::Relaxed),
             timestamp: Some(chrono_to_proto(Utc::now())),
+        }))
+    }
+
+    // ── Database maintenance RPCs ─────────────────────────────────────
+
+    async fn db_stats(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<DbStatsResponse>, Status> {
+        let (networks, hosts, services, events, interfaces, wifi) = self
+            .engine.db().table_counts().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(DbStatsResponse {
+            db_path: String::new(),
+            db_size_bytes: 0, // Could stat the file but path isn't easily accessible
+            total_networks: networks,
+            total_hosts: hosts,
+            total_services: services,
+            total_events: events,
+            total_interfaces: interfaces,
+            total_wifi_networks: wifi,
+        }))
+    }
+
+    async fn db_reset(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<DbMaintenanceResponse>, Status> {
+        let rows = self.engine.db().reset_all().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        self.engine.clear_memory();
+        Ok(Response::new(DbMaintenanceResponse {
+            action: "reset".into(),
+            rows_affected: rows,
+            message: format!("deleted {rows} rows from all tables, cleared in-memory state"),
+        }))
+    }
+
+    async fn db_delete_network(
+        &self,
+        request: Request<NetworkHostsRequest>,
+    ) -> Result<Response<DbMaintenanceResponse>, Status> {
+        let network_id = &request.get_ref().network_id;
+        let rows = self.engine.db().delete_network(network_id).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(DbMaintenanceResponse {
+            action: "delete_network".into(),
+            rows_affected: rows,
+            message: format!("deleted network {network_id} and {rows} associated rows"),
+        }))
+    }
+
+    async fn db_purge_stale_hosts(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<DbMaintenanceResponse>, Status> {
+        let rows = self.engine.db().purge_stale_hosts().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(DbMaintenanceResponse {
+            action: "purge_stale_hosts".into(),
+            rows_affected: rows,
+            message: format!("purged {rows} stale hosts"),
+        }))
+    }
+
+    async fn db_purge_events(
+        &self,
+        request: Request<PurgeEventsRequest>,
+    ) -> Result<Response<DbMaintenanceResponse>, Status> {
+        let older_than = request.get_ref().older_than_secs;
+        let rows = if older_than == 0 {
+            self.engine.db().purge_all_events().await
+        } else {
+            self.engine.db().prune_events(older_than).await
+        }.map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(DbMaintenanceResponse {
+            action: "purge_events".into(),
+            rows_affected: rows,
+            message: format!("purged {rows} events"),
+        }))
+    }
+
+    async fn db_vacuum(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<DbMaintenanceResponse>, Status> {
+        self.engine.db().vacuum().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(DbMaintenanceResponse {
+            action: "vacuum".into(),
+            rows_affected: 0,
+            message: "database vacuumed".into(),
         }))
     }
 }

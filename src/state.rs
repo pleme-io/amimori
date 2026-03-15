@@ -241,6 +241,20 @@ impl StateEngine {
         self.db.hosts_for_network(network_id).await
     }
 
+    /// Get the underlying database reference for maintenance operations.
+    pub fn db(&self) -> &dyn crate::traits::StorageBackend {
+        self.db.as_ref()
+    }
+
+    /// Reset all in-memory state (used after DB reset).
+    pub fn clear_memory(&self) {
+        self.state.hosts.clear();
+        self.state.ip_to_mac.clear();
+        self.state.wifi_networks.clear();
+        self.state.active_networks.clear();
+        // Don't clear interfaces — let the collector re-populate
+    }
+
     /// Get the current network_id for an interface.
     /// Prefers strong identity from `active_networks` (gateway_mac|subnet_cidr),
     /// falls back to provisional identity from interface (gateway_ip|subnet_mask).

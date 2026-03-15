@@ -14,6 +14,13 @@ service NetworkProfiler {
   rpc ListWifiNetworks(Empty) returns (WifiNetworkList);
   rpc ListNetworks(Empty) returns (NetworkList);
   rpc GetNetworkHosts(NetworkHostsRequest) returns (NetworkSnapshot);
+  // Database maintenance
+  rpc DbStats(Empty) returns (DbStatsResponse);
+  rpc DbReset(Empty) returns (DbMaintenanceResponse);
+  rpc DbDeleteNetwork(NetworkHostsRequest) returns (DbMaintenanceResponse);
+  rpc DbPurgeStaleHosts(Empty) returns (DbMaintenanceResponse);
+  rpc DbPurgeEvents(PurgeEventsRequest) returns (DbMaintenanceResponse);
+  rpc DbVacuum(Empty) returns (DbMaintenanceResponse);
 }
 
 message Empty {}
@@ -169,6 +176,27 @@ message NetworkRecord {
   google.protobuf.Timestamp first_seen = 9;
   google.protobuf.Timestamp last_seen = 10;
   uint32 host_count = 11;
+}
+
+message PurgeEventsRequest {
+  uint64 older_than_secs = 1;  // delete events older than this many seconds (0 = all)
+}
+
+message DbStatsResponse {
+  string db_path = 1;
+  uint64 db_size_bytes = 2;
+  uint32 total_networks = 3;
+  uint32 total_hosts = 4;
+  uint32 total_services = 5;
+  uint32 total_events = 6;
+  uint32 total_interfaces = 7;
+  uint32 total_wifi_networks = 8;
+}
+
+message DbMaintenanceResponse {
+  string action = 1;
+  uint64 rows_affected = 2;
+  string message = 3;
 }
 
 message InterfaceList { repeated NetworkInterface interfaces = 1; }
