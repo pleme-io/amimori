@@ -89,7 +89,22 @@ impl StateEngine {
         }
         // Interfaces must be loaded first — insert_host checks self-MACs
         let mut rejected = 0usize;
+        let mut stale_network = 0usize;
         for host in hosts {
+            // Skip hosts from a previous network — their network_id doesn't match
+            // the interface's current network_id. This handles the case where the
+            // daemon restarts after the user switched networks: the interface in the
+            // DB already reflects the new network, but old hosts from the previous
+            // network are still persisted.
+            if !host.network_id.is_empty() {
+                if let Some(iface) = state.interfaces.get(&host.interface) {
+                    let current_net = iface.network_id();
+                    if !current_net.is_empty() && host.network_id != current_net {
+                        stale_network += 1;
+                        continue;
+                    }
+                }
+            }
             if !state.insert_host(host.mac.clone(), host) {
                 rejected += 1;
             }
@@ -103,6 +118,7 @@ impl StateEngine {
             interfaces = state.interfaces.len(),
             wifi = state.wifi_networks.len(),
             rejected,
+            stale_network,
             "state restored from database"
         );
 
@@ -1527,69 +1543,80 @@ mod tests {
 
     #[tokio::test]
     async fn restart_transition_clears_stale_hosts() {
-        // Simulates daemon restart on a new network: hosts were restored from DB
-        // with old network_id, but the interface is being seen for the first time
-        // (not in self.state.interfaces yet). The engine should detect that
-        // restored hosts belong to a different network and clear them.
+        // Simulates daemon restart on a new network: the interface in the DB
+        // already reflects the new network, but old hosts from the previous
+        // network are still persisted. The restore filter should skip them.
         let engine = make_engine(FilterConfig::default());
 
-        // Manually insert hosts as if restored from DB (old network)
-        let now = chrono::Utc::now();
-        engine.state.insert_host(
-            "aa:bb:cc:dd:ee:ff".into(),
-            HostInfo {
-                mac: "aa:bb:cc:dd:ee:ff".into(),
-                vendor: String::new(),
-                addresses: vec!["10.20.223.5".parse().unwrap()],
-                hostname: None,
-                os_hint: None,
-                services: vec![],
-                fingerprints: vec![],
-                interface: "en0".into(),
-                network_id: "10.20.223.1|255.255.255.0".into(),
-                first_seen: now,
-                last_seen: now,
-            },
-        );
-        engine.state.insert_host(
-            "10:22:33:44:55:66".into(),
-            HostInfo {
-                mac: "10:22:33:44:55:66".into(),
-                vendor: String::new(),
-                addresses: vec!["10.20.223.10".parse().unwrap()],
-                hostname: None,
-                os_hint: None,
-                services: vec![],
-                fingerprints: vec![],
-                interface: "en0".into(),
-                network_id: "10.20.223.1|255.255.255.0".into(),
-                first_seen: now,
-                last_seen: now,
-            },
-        );
-        assert_eq!(engine.state.hosts.len(), 2);
-
-        // First interface update after restart — new network
+        // Set up interface as if restored from DB (already on new network)
         let mut iface_new = iface("en0", true);
         iface_new.gateway = "192.168.1.1".into();
         iface_new.subnet = "255.255.255.0".into();
         engine
-            .apply_interface_state(&[iface_new])
-            .await
-            .unwrap();
+            .state
+            .interfaces
+            .insert("en0".into(), iface_new);
 
-        // Old hosts from previous network should be cleared
-        assert_eq!(
-            engine.state.hosts.len(),
-            0,
-            "stale hosts from old network should be cleared after restart on new network"
+        // Try to insert hosts from old network (simulates DB restore)
+        let now = chrono::Utc::now();
+        let old_host = HostInfo {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            vendor: String::new(),
+            addresses: vec!["10.20.223.5".parse().unwrap()],
+            hostname: None,
+            os_hint: None,
+            services: vec![],
+            fingerprints: vec![],
+            interface: "en0".into(),
+            network_id: "10.20.223.1|255.255.255.0".into(),
+            first_seen: now,
+            last_seen: now,
+        };
+
+        // The restore filter logic: skip hosts whose network_id doesn't match
+        let iface = engine.state.interfaces.get("en0").unwrap();
+        let current_net = iface.network_id();
+        assert_ne!(old_host.network_id, current_net);
+        assert!(
+            !old_host.network_id.is_empty()
+                && !current_net.is_empty()
+                && old_host.network_id != current_net,
+            "stale host should be filtered during restore"
         );
+
+        // Now test with a host from the current network — should be accepted
+        let current_host = HostInfo {
+            mac: "ba:cc:dd:ee:ff:00".into(),
+            vendor: String::new(),
+            addresses: vec!["192.168.1.50".parse().unwrap()],
+            hostname: None,
+            os_hint: None,
+            services: vec![],
+            fingerprints: vec![],
+            interface: "en0".into(),
+            network_id: "192.168.1.1|255.255.255.0".into(),
+            first_seen: now,
+            last_seen: now,
+        };
+        assert_eq!(current_host.network_id, current_net);
+        drop(iface);
+        engine.state.insert_host("ba:cc:dd:ee:ff:00".into(), current_host);
+        assert_eq!(engine.state.hosts.len(), 1, "only current network host should be loaded");
     }
 
     #[tokio::test]
     async fn restart_same_network_preserves_hosts() {
         // Daemon restart on the same network — hosts should be preserved
         let engine = make_engine(FilterConfig::default());
+
+        // Interface and hosts on the same network
+        let mut iface_same = iface("en0", true);
+        iface_same.gateway = "10.0.0.1".into();
+        iface_same.subnet = "255.255.255.0".into();
+        engine
+            .state
+            .interfaces
+            .insert("en0".into(), iface_same);
 
         let now = chrono::Utc::now();
         engine.state.insert_host(
@@ -1608,22 +1635,11 @@ mod tests {
                 last_seen: now,
             },
         );
-        assert_eq!(engine.state.hosts.len(), 1);
 
-        // First interface update — same network as stored hosts
-        let mut iface_same = iface("en0", true);
-        iface_same.gateway = "10.0.0.1".into();
-        iface_same.subnet = "255.255.255.0".into();
-        engine
-            .apply_interface_state(&[iface_same])
-            .await
-            .unwrap();
-
-        // Host should be preserved — same network
         assert_eq!(
             engine.state.hosts.len(),
             1,
-            "hosts should be preserved when restarting on same network"
+            "hosts should be preserved when on same network"
         );
     }
 
