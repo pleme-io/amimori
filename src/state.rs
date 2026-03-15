@@ -135,9 +135,18 @@ impl StateEngine {
                         continue;
                     }
                 }
-                if state.insert_host(host.mac.clone(), host) {
+                // Also reject hosts with invalid MACs (broadcast, multicast, self).
+                // Clean them from DB since they're garbage from the pre-validation era.
+                if crate::model::is_non_host_mac(&host.mac) || state.is_self_mac(&host.mac) {
+                    let _ = db.remove_host(&host.mac).await;
+                    rejected += 1;
+                    continue;
+                }
+                let mac = host.mac.clone();
+                if state.insert_host(mac.clone(), host) {
                     loaded += 1;
                 } else {
+                    let _ = db.remove_host(&mac).await;
                     rejected += 1;
                 }
             }
