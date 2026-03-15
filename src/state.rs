@@ -212,6 +212,27 @@ impl StateEngine {
             .unwrap_or_default()
     }
 
+    /// Check if an IPv4 address belongs to a CIDR subnet (e.g. "10.0.0.0/24").
+    fn ipv4_in_cidr(ip: std::net::Ipv4Addr, cidr: &str) -> bool {
+        let Some((net_str, prefix_str)) = cidr.split_once('/') else {
+            return false;
+        };
+        let Ok(net) = net_str.parse::<std::net::Ipv4Addr>() else {
+            return false;
+        };
+        let Ok(prefix) = prefix_str.parse::<u32>() else {
+            return false;
+        };
+        if prefix > 32 {
+            return false;
+        }
+        if prefix == 0 {
+            return true;
+        }
+        let mask = u32::MAX << (32 - prefix);
+        (u32::from(ip) & mask) == (u32::from(net) & mask)
+    }
+
     // ── Apply methods ──────────────────────────────────────────────────
 
     pub async fn apply_arp_results(&self, entries: &[ArpEntry]) -> anyhow::Result<()> {
@@ -229,6 +250,17 @@ impl StateEngine {
                 || self.filters.should_exclude_ip(&entry.ip)
             {
                 continue;
+            }
+
+            // Reject ARP entries whose IP is outside the interface's subnet.
+            // macOS retains stale ARP entries from previous networks — without
+            // this check, they get re-added with the wrong network_id.
+            if let Some(iface) = self.state.interfaces.get(&entry.interface) {
+                if let (std::net::IpAddr::V4(ip4), Some(cidr)) = (entry.ip, iface.cidr()) {
+                    if !Self::ipv4_in_cidr(ip4, &cidr) {
+                        continue;
+                    }
+                }
             }
 
             if let Some(mut existing) = self.state.hosts.get_mut(&mac) {
@@ -1742,6 +1774,7 @@ mod tests {
         let mut iface_b = iface("en0", true);
         iface_b.gateway = "192.168.1.1".into();
         iface_b.subnet = "255.255.255.0".into();
+        iface_b.ipv4 = vec!["192.168.1.10".parse().unwrap()];
         engine
             .apply_interface_state(&[iface_b])
             .await
@@ -1816,9 +1849,11 @@ mod tests {
         let mut en0 = iface("en0", true);
         en0.gateway = "10.0.0.1".into();
         en0.subnet = "255.255.255.0".into();
+        en0.ipv4 = vec!["10.0.0.10".parse().unwrap()];
         let mut en4 = iface("en4", true);
         en4.gateway = "192.168.1.1".into();
         en4.subnet = "255.255.255.0".into();
+        en4.ipv4 = vec!["192.168.1.10".parse().unwrap()];
         en4.kind = crate::model::InterfaceKind::Ethernet;
         engine
             .apply_interface_state(&[en0.clone(), en4.clone()])
@@ -1839,6 +1874,7 @@ mod tests {
         let mut en0_new = iface("en0", true);
         en0_new.gateway = "172.16.0.1".into();
         en0_new.subnet = "255.255.0.0".into();
+        en0_new.ipv4 = vec!["172.16.0.10".parse().unwrap()];
         engine
             .apply_interface_state(&[en0_new, en4])
             .await
@@ -2228,6 +2264,60 @@ mod tests {
     async fn apply_empty_banners() {
         let engine = make_engine(FilterConfig::default());
         engine.apply_banners(&[]).await.unwrap();
+    }
+
+    // ── Subnet validation (ARP) ─────────────────────────────────────
+
+    #[test]
+    fn ipv4_in_cidr_match() {
+        let ip: std::net::Ipv4Addr = "10.20.223.5".parse().unwrap();
+        assert!(StateEngine::ipv4_in_cidr(ip, "10.20.223.0/24"));
+    }
+
+    #[test]
+    fn ipv4_in_cidr_mismatch() {
+        let ip: std::net::Ipv4Addr = "10.248.52.100".parse().unwrap();
+        assert!(!StateEngine::ipv4_in_cidr(ip, "10.20.223.0/24"));
+    }
+
+    #[test]
+    fn ipv4_in_cidr_slash16() {
+        let ip: std::net::Ipv4Addr = "172.16.5.42".parse().unwrap();
+        assert!(StateEngine::ipv4_in_cidr(ip, "172.16.0.0/16"));
+        assert!(!StateEngine::ipv4_in_cidr(ip, "172.17.0.0/16"));
+    }
+
+    #[tokio::test]
+    async fn arp_rejects_out_of_subnet_entries() {
+        let engine = make_engine(FilterConfig::default());
+
+        // Set up interface on 10.20.223.0/24
+        let mut iface = iface("en0", true);
+        iface.gateway = "10.20.223.183".into();
+        iface.subnet = "255.255.255.0".into();
+        iface.ipv4 = vec!["10.20.223.101".parse().unwrap()];
+        engine
+            .apply_interface_state(&[iface])
+            .await
+            .unwrap();
+
+        // ARP entry from the current subnet — should be accepted
+        engine
+            .apply_arp_results(&[arp_entry("aa:bb:cc:dd:ee:ff", "10.20.223.50", "en0")])
+            .await
+            .unwrap();
+        assert_eq!(engine.state.hosts.len(), 1);
+
+        // ARP entry from a different subnet (stale cache) — should be rejected
+        engine
+            .apply_arp_results(&[arp_entry("ba:cc:dd:ee:ff:00", "10.248.52.100", "en0")])
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.state.hosts.len(),
+            1,
+            "out-of-subnet ARP entry should be rejected"
+        );
     }
 
     // ── Fingerprint promotion ─────────────────────────────────────────
