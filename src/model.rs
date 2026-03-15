@@ -269,6 +269,16 @@ pub enum HostStatus {
     Historical,
 }
 
+impl fmt::Display for HostStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Active => f.write_str("active"),
+            Self::Stale => f.write_str("stale"),
+            Self::Historical => f.write_str("historical"),
+        }
+    }
+}
+
 // ── Host info ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

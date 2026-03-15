@@ -12,6 +12,8 @@ service NetworkProfiler {
   rpc GetHost(HostRequest) returns (Host);
   rpc ListInterfaces(Empty) returns (InterfaceList);
   rpc ListWifiNetworks(Empty) returns (WifiNetworkList);
+  rpc ListNetworks(Empty) returns (NetworkList);
+  rpc GetNetworkHosts(NetworkHostsRequest) returns (NetworkSnapshot);
 }
 
 message Empty {}
@@ -100,6 +102,8 @@ message Host {
   google.protobuf.Timestamp last_seen = 10;
   float outlier_score = 11;           // 0.0-5.0 anomaly score
   repeated Fingerprint fingerprints = 12;
+  string network_id = 13;
+  string status = 14;                 // active, stale, historical
 }
 
 message Fingerprint {
@@ -149,5 +153,24 @@ message ConvergenceStatus {
   uint32 enriched_hosts = 11;         // hosts with fingerprints
 }
 
+message NetworkHostsRequest {
+  string network_id = 1;  // network ID to query hosts for
+}
+
+message NetworkRecord {
+  string id = 1;
+  string ssid = 2;
+  string gateway_mac = 3;
+  string gateway_ip = 4;
+  string subnet_cidr = 5;
+  string subnet_mask = 6;
+  string interface = 7;
+  uint32 times_connected = 8;
+  google.protobuf.Timestamp first_seen = 9;
+  google.protobuf.Timestamp last_seen = 10;
+  uint32 host_count = 11;
+}
+
 message InterfaceList { repeated NetworkInterface interfaces = 1; }
 message WifiNetworkList { repeated WifiNetwork networks = 1; }
+message NetworkList { repeated NetworkRecord networks = 1; }

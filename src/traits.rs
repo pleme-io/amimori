@@ -169,6 +169,7 @@ pub trait StorageBackend: Send + Sync {
     async fn migrate_hosts_network_id(&self, old_id: &str, new_id: &str) -> anyhow::Result<u64>;
     async fn bump_network_connection(&self, network_id: &str) -> anyhow::Result<()>;
     async fn get_network(&self, id: &str) -> anyhow::Result<Option<NetworkInfo>>;
+    async fn all_networks(&self) -> anyhow::Result<Vec<NetworkInfo>>;
 }
 
 // ── Gateway / DNS providers ────────────────────────────────────────────────
@@ -386,6 +387,10 @@ pub mod mocks {
 
         async fn get_network(&self, _id: &str) -> anyhow::Result<Option<NetworkInfo>> {
             Ok(None) // no-op for tests
+        }
+
+        async fn all_networks(&self) -> anyhow::Result<Vec<NetworkInfo>> {
+            Ok(vec![]) // no-op for tests
         }
     }
 

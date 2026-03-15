@@ -77,6 +77,12 @@ struct ExportInput {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct EmptyInput {}
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct NetworkHostsInput {
+    #[schemars(description = "Network ID to query hosts for (from network_list output)")]
+    network_id: String,
+}
+
 // ── MCP Server ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -326,6 +332,70 @@ impl AmimoriMcp {
                 out
             }
             Err(e) => format!("amimori: unavailable\nerror: {e}"),
+        }
+    }
+
+    #[tool(description = "List all known networks — every network the device has connected to, with host counts and visit history")]
+    async fn network_list(&self, Parameters(_): Parameters<EmptyInput>) -> String {
+        let mut client = self.client();
+
+        match client.list_networks(proto::Empty {}).await {
+            Ok(resp) => {
+                let nets = resp.into_inner().networks;
+                let mut out = String::new();
+                let _ = writeln!(out, "{} networks\n", nets.len());
+                for n in &nets {
+                    let ssid = if n.ssid.is_empty() { "(unknown)" } else { &n.ssid };
+                    let identity = if n.gateway_mac.is_empty() { "provisional" } else { "strong" };
+                    let _ = writeln!(
+                        out,
+                        "  {} | {} | gw={} ({}) | {} hosts | connected {}x",
+                        n.id, ssid, n.gateway_ip, identity, n.host_count, n.times_connected,
+                    );
+                    let _ = writeln!(
+                        out,
+                        "    subnet: {} | interface: {}",
+                        n.subnet_cidr, n.interface,
+                    );
+                }
+                out
+            }
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    #[tool(description = "List hosts from a specific network (current or historical) by network ID")]
+    async fn network_hosts_by_id(&self, Parameters(input): Parameters<NetworkHostsInput>) -> String {
+        let mut client = self.client();
+
+        match client
+            .get_network_hosts(proto::NetworkHostsRequest {
+                network_id: input.network_id.clone(),
+            })
+            .await
+        {
+            Ok(resp) => {
+                let hosts = resp.into_inner().hosts;
+                let mut out = String::new();
+                let _ = writeln!(out, "{} hosts on network {}\n", hosts.len(), input.network_id);
+                for h in &hosts {
+                    let name = if !h.hostname.is_empty() {
+                        &h.hostname
+                    } else if !h.vendor.is_empty() {
+                        &h.vendor
+                    } else {
+                        ""
+                    };
+                    let svcs: Vec<String> = h.services.iter()
+                        .map(|s| format!("{}({})", s.port, s.name))
+                        .collect();
+                    let svc_str = if svcs.is_empty() { String::new() } else { format!(" | {}", svcs.join(" ")) };
+                    let _ = writeln!(out, "  {} | {} | {} | {:?}{svc_str}",
+                        h.mac, name, h.status, h.ipv4);
+                }
+                out
+            }
+            Err(e) => format!("error: {e}"),
         }
     }
 }

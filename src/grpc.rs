@@ -19,7 +19,7 @@ use proto::network_profiler_server::{NetworkProfiler, NetworkProfilerServer};
 use proto::{
     ChangesRequest, ChangesResponse, DeltaUpdate, Empty, Host, HostRequest, InterfaceList,
     NetworkInterface, NetworkSnapshot, Service, ServiceChange, SnapshotRequest, SubscribeRequest,
-    WifiNetwork, WifiNetworkList,
+    WifiNetwork, WifiNetworkList, NetworkList, NetworkRecord, NetworkHostsRequest,
 };
 
 struct ProfilerService {
@@ -198,6 +198,63 @@ impl NetworkProfiler for ProfilerService {
             .collect();
         Ok(Response::new(WifiNetworkList { networks }))
     }
+
+    async fn list_networks(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<NetworkList>, Status> {
+        let db_networks = self
+            .engine
+            .all_networks()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let mut records = Vec::with_capacity(db_networks.len());
+        for net in &db_networks {
+            let host_count = self
+                .engine
+                .hosts_for_network(&net.id)
+                .await
+                .map(|h| h.len() as u32)
+                .unwrap_or(0);
+
+            records.push(NetworkRecord {
+                id: net.id.clone(),
+                ssid: net.ssid.clone(),
+                gateway_mac: net.gateway_mac.clone(),
+                gateway_ip: net.gateway_ip.clone(),
+                subnet_cidr: net.subnet_cidr.clone(),
+                subnet_mask: net.subnet_mask.clone(),
+                interface: net.interface.clone(),
+                times_connected: net.times_connected,
+                first_seen: Some(chrono_to_proto(net.first_seen)),
+                last_seen: Some(chrono_to_proto(net.last_seen)),
+                host_count,
+            });
+        }
+
+        Ok(Response::new(NetworkList { networks: records }))
+    }
+
+    async fn get_network_hosts(
+        &self,
+        request: Request<NetworkHostsRequest>,
+    ) -> Result<Response<NetworkSnapshot>, Status> {
+        let network_id = &request.get_ref().network_id;
+        let hosts = self
+            .engine
+            .hosts_for_network(network_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(NetworkSnapshot {
+            interfaces: vec![],
+            hosts: hosts.iter().map(host_to_proto).collect(),
+            wifi_networks: vec![],
+            sequence: self.engine.state.sequence.load(std::sync::atomic::Ordering::Relaxed),
+            timestamp: Some(chrono_to_proto(Utc::now())),
+        }))
+    }
 }
 
 // ── Public proto→model conversions (used by CLI and MCP) ──────────────────
@@ -235,7 +292,7 @@ pub fn proto_to_host_info(h: &Host) -> HostInfo {
             observed_at: chrono::Utc::now(),
         }).collect(),
         interface: h.interface.clone(),
-        network_id: String::new(),
+        network_id: h.network_id.clone(),
         status: crate::model::HostStatus::default(),
         first_seen: h.first_seen.as_ref().map(|t| {
             chrono::DateTime::from_timestamp(t.seconds, t.nanos as u32)
@@ -338,6 +395,8 @@ fn host_to_proto(h: &HostInfo) -> Host {
         last_seen: Some(chrono_to_proto(h.last_seen)),
         outlier_score: h.outlier_score(),
         fingerprints: h.fingerprints.iter().map(fp_to_proto).collect(),
+        network_id: h.network_id.clone(),
+        status: format!("{}", h.status),
     }
 }
 

@@ -710,6 +710,10 @@ impl StorageBackend for Database {
     async fn get_network(&self, id: &str) -> anyhow::Result<Option<NetworkInfo>> {
         self.get_network(id).await
     }
+
+    async fn all_networks(&self) -> anyhow::Result<Vec<NetworkInfo>> {
+        self.all_networks().await
+    }
 }
 
 #[cfg(test)]

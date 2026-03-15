@@ -222,6 +222,16 @@ impl StateEngine {
         self.state.get_host(addr)
     }
 
+    /// List all known networks from the database.
+    pub async fn all_networks(&self) -> anyhow::Result<Vec<crate::model::NetworkInfo>> {
+        self.db.all_networks().await
+    }
+
+    /// Load hosts for a specific network from the database.
+    pub async fn hosts_for_network(&self, network_id: &str) -> anyhow::Result<Vec<HostInfo>> {
+        self.db.hosts_for_network(network_id).await
+    }
+
     /// Get the current network_id for an interface.
     /// Prefers strong identity from `active_networks` (gateway_mac|subnet_cidr),
     /// falls back to provisional identity from interface (gateway_ip|subnet_mask).

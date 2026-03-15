@@ -92,6 +92,20 @@ enum Cli {
         /// MAC address of host to wake
         mac: String,
     },
+    /// List all known networks (current + historical)
+    Networks {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show hosts from a specific network by ID
+    NetworkHosts {
+        /// Network ID (from `networks` command output)
+        network_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show current configuration (defaults + overrides)
     Config,
     /// Show recent network changes
@@ -344,6 +358,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match wake_on_lan::MagicPacket::new(&arr).send() {
                 Ok(()) => println!("WoL sent to {mac}"),
                 Err(e) => { eprintln!("WoL failed: {e}"); std::process::exit(1); }
+            }
+        }
+        Cli::Networks { json } => {
+            let mut client = grpc_client().await;
+            let resp = client.list_networks(grpc::proto::Empty {}).await?;
+            let nets = resp.into_inner().networks;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&nets.iter().map(|n| serde_json::json!({
+                    "id": n.id, "ssid": n.ssid, "gateway_mac": n.gateway_mac,
+                    "gateway_ip": n.gateway_ip, "subnet_cidr": n.subnet_cidr,
+                    "interface": n.interface, "times_connected": n.times_connected,
+                    "host_count": n.host_count,
+                })).collect::<Vec<_>>())?);
+            } else {
+                println!("{} networks\n", nets.len());
+                for n in &nets {
+                    let ssid = if n.ssid.is_empty() { "(unknown)" } else { &n.ssid };
+                    let identity = if n.gateway_mac.is_empty() { "provisional" } else { "strong" };
+                    println!("  {} | {} | gw={} ({}) | {} hosts | connected {}x",
+                        n.id, ssid, n.gateway_ip, identity, n.host_count, n.times_connected);
+                    println!("    subnet: {} | interface: {}", n.subnet_cidr, n.interface);
+                }
+            }
+        }
+        Cli::NetworkHosts { network_id, json } => {
+            let mut client = grpc_client().await;
+            let resp = client.get_network_hosts(grpc::proto::NetworkHostsRequest {
+                network_id: network_id.clone(),
+            }).await?;
+            let hosts = resp.into_inner().hosts;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&hosts.iter().map(|h| serde_json::json!({
+                    "mac": h.mac, "vendor": h.vendor, "hostname": h.hostname,
+                    "ipv4": h.ipv4, "status": h.status, "network_id": h.network_id,
+                    "outlier_score": h.outlier_score,
+                })).collect::<Vec<_>>())?);
+            } else {
+                println!("{} hosts on network {}\n", hosts.len(), network_id);
+                for h in &hosts {
+                    let name = if !h.hostname.is_empty() { &h.hostname }
+                        else if !h.vendor.is_empty() { &h.vendor }
+                        else { "" };
+                    println!("  {} | {} | {} | {:?}", h.mac, name, h.status, h.ipv4);
+                }
             }
         }
         Cli::Config => {
