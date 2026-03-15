@@ -373,6 +373,66 @@ pub struct WifiInfo {
     pub interface: String,
 }
 
+// ── Network identity (ADR-015) ─────────────────────────────────────────────
+
+/// A known network the device has connected to.
+///
+/// Each network is identified by a composite fingerprint (gateway MAC + subnet
+/// CIDR). When the device reconnects to a known network, the existing host tree
+/// is restored from the database rather than starting from scratch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NetworkInfo {
+    /// Composite identity key: `{gateway_mac}|{subnet_cidr}` or
+    /// `{gateway_ip}|{subnet_mask}` as fallback.
+    pub id: String,
+    pub ssid: String,
+    pub gateway_mac: String,
+    pub gateway_ip: String,
+    pub subnet_cidr: String,
+    pub subnet_mask: String,
+    pub interface: String,
+    pub times_connected: u32,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+}
+
+impl NetworkInfo {
+    /// Build a network identity from interface info + gateway MAC.
+    ///
+    /// Prefers `gateway_mac|subnet_cidr` (hardware-bound, stable) over
+    /// `gateway_ip|subnet_mask` (common across networks).
+    pub fn from_interface(iface: &InterfaceInfo, gateway_mac: &str) -> Option<Self> {
+        if !iface.is_up || (iface.gateway.is_empty() && iface.subnet.is_empty()) {
+            return None;
+        }
+
+        let subnet_cidr = iface.cidr().unwrap_or_default();
+        let id = if !gateway_mac.is_empty() && !subnet_cidr.is_empty() {
+            format!("{gateway_mac}|{subnet_cidr}")
+        } else {
+            iface.network_id() // fallback: gateway_ip|subnet_mask
+        };
+
+        if id.is_empty() {
+            return None;
+        }
+
+        let now = Utc::now();
+        Some(Self {
+            id,
+            ssid: String::new(), // set later from WiFi scan
+            gateway_mac: gateway_mac.to_string(),
+            gateway_ip: iface.gateway.clone(),
+            subnet_cidr,
+            subnet_mask: iface.subnet.clone(),
+            interface: iface.name.clone(),
+            times_connected: 1,
+            first_seen: now,
+            last_seen: now,
+        })
+    }
+}
+
 // ── Delta types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

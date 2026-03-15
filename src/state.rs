@@ -81,45 +81,47 @@ impl StateEngine {
         let db = Database::open(&config.resolved_db_path()).await?;
         let vendor = OuiVendorLookup::new();
 
-        let (interfaces, hosts, wifi) = db.load_all().await?;
+        let (interfaces, _all_hosts, wifi) = db.load_all().await?;
 
         let state = Arc::new(NetworkState::new());
-        for iface in interfaces {
-            state.interfaces.insert(iface.name.clone(), iface);
+        for iface in &interfaces {
+            state.interfaces.insert(iface.name.clone(), iface.clone());
         }
-        // Interfaces must be loaded first — insert_host checks self-MACs
+
+        // Determine active network IDs from interfaces, then load only those hosts.
+        let mut active_networks: Vec<String> = interfaces
+            .iter()
+            .filter(|i| i.is_up)
+            .map(|i| i.network_id())
+            .filter(|id| !id.is_empty())
+            .collect();
+        active_networks.dedup();
+
+        // Load hosts scoped to active networks only.
         let mut rejected = 0usize;
-        let mut stale_network = 0usize;
-        for host in hosts {
-            // Skip hosts from a previous network — their network_id doesn't match
-            // the interface's current network_id. This handles the case where the
-            // daemon restarts after the user switched networks: the interface in the
-            // DB already reflects the new network, but old hosts from the previous
-            // network are still persisted.
-            if !host.network_id.is_empty() {
-                if let Some(iface) = state.interfaces.get(&host.interface) {
-                    let current_net = iface.network_id();
-                    if !current_net.is_empty() && host.network_id != current_net {
-                        stale_network += 1;
-                        continue;
-                    }
+        let mut loaded = 0usize;
+        for net_id in &active_networks {
+            let hosts = db.hosts_for_network(net_id).await?;
+            for host in hosts {
+                if state.insert_host(host.mac.clone(), host) {
+                    loaded += 1;
+                } else {
+                    rejected += 1;
                 }
             }
-            if !state.insert_host(host.mac.clone(), host) {
-                rejected += 1;
-            }
         }
+
         for w in wifi {
             state.wifi_networks.insert(w.bssid.clone(), w);
         }
 
         tracing::info!(
-            hosts = state.hosts.len(),
+            hosts = loaded,
+            active_networks = active_networks.len(),
             interfaces = state.interfaces.len(),
             wifi = state.wifi_networks.len(),
             rejected,
-            stale_network,
-            "state restored from database"
+            "state restored (network-scoped)"
         );
 
         let (event_broadcast, _) = broadcast::channel(config.storage.event_buffer_size);
@@ -350,14 +352,51 @@ impl StateEngine {
                 .interfaces
                 .insert(iface.name.clone(), iface.clone());
 
-            // If the network changed, clear hosts and trigger reactive collectors
+            // If the network changed, clear old hosts + try to restore known hosts
             if let Some((old_net, new_net)) = network_transition {
                 let cleared = self.clear_hosts_on_interface(&iface.name).await?;
+
+                // Create/update the new network record in the DB.
+                // Gateway MAC will be filled in later when ARP collector resolves it.
+                let net_info = crate::model::NetworkInfo {
+                    id: new_net.clone(),
+                    ssid: String::new(),
+                    gateway_mac: String::new(),
+                    gateway_ip: iface.gateway.clone(),
+                    subnet_cidr: iface.cidr().unwrap_or_default(),
+                    subnet_mask: iface.subnet.clone(),
+                    interface: iface.name.clone(),
+                    times_connected: 1,
+                    first_seen: Utc::now(),
+                    last_seen: Utc::now(),
+                };
+                if let Err(e) = self.db.upsert_network(&net_info).await {
+                    tracing::warn!(error = %e, "failed to persist network record");
+                }
+
+                // Try to restore hosts from a previously-seen network.
+                let restored = match self.db.hosts_for_network(&new_net).await {
+                    Ok(hosts) => {
+                        let mut count = 0usize;
+                        for host in hosts {
+                            if self.state.insert_host(host.mac.clone(), host) {
+                                count += 1;
+                            }
+                        }
+                        count
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to restore hosts for network");
+                        0
+                    }
+                };
+
                 tracing::info!(
                     interface = %iface.name,
                     old_network = %old_net,
                     new_network = %new_net,
                     hosts_cleared = cleared,
+                    hosts_restored = restored,
                     "network transition detected"
                 );
                 self.emit(Change::NetworkChanged {

@@ -12,7 +12,7 @@ use sea_orm::{
 };
 use sea_orm_migration::MigratorTrait;
 
-use crate::model::{Change, DeltaEvent, HostInfo, InterfaceInfo, InterfaceKind, ServiceInfo, WifiInfo};
+use crate::model::{Change, DeltaEvent, HostInfo, InterfaceInfo, InterfaceKind, NetworkInfo, ServiceInfo, WifiInfo};
 use crate::traits::StorageBackend;
 
 /// Persistent storage backed by SQLite via SeaORM.
@@ -316,6 +316,117 @@ impl Database {
         Ok(rows.into_iter().map(row_to_wifi_info).collect())
     }
 
+    // ── Network operations ──────────────────────────────────────────────
+
+    pub async fn upsert_network(&self, network: &NetworkInfo) -> anyhow::Result<()> {
+        let document = serde_json::to_string(network)?;
+
+        let existing = entity::network::Entity::find_by_id(&network.id)
+            .one(&self.conn)
+            .await?;
+
+        if let Some(row) = existing {
+            let active = entity::network::ActiveModel {
+                id: Set(network.id.clone()),
+                ssid: Set(network.ssid.clone()),
+                gateway_mac: Set(network.gateway_mac.clone()),
+                gateway_ip: Set(network.gateway_ip.clone()),
+                subnet_cidr: Set(network.subnet_cidr.clone()),
+                subnet_mask: Set(network.subnet_mask.clone()),
+                interface: Set(network.interface.clone()),
+                times_connected: Set(row.times_connected),
+                first_seen: sea_orm::ActiveValue::NotSet,
+                last_seen: Set(network.last_seen),
+                document_json: Set(Some(document)),
+            };
+            active.update(&self.conn).await?;
+        } else {
+            let active = entity::network::ActiveModel {
+                id: Set(network.id.clone()),
+                ssid: Set(network.ssid.clone()),
+                gateway_mac: Set(network.gateway_mac.clone()),
+                gateway_ip: Set(network.gateway_ip.clone()),
+                subnet_cidr: Set(network.subnet_cidr.clone()),
+                subnet_mask: Set(network.subnet_mask.clone()),
+                interface: Set(network.interface.clone()),
+                times_connected: Set(1),
+                first_seen: Set(network.first_seen),
+                last_seen: Set(network.last_seen),
+                document_json: Set(Some(document)),
+            };
+            active.insert(&self.conn).await?;
+        }
+        Ok(())
+    }
+
+    /// Increment the connection counter for a known network.
+    pub async fn bump_network_connection(&self, network_id: &str) -> anyhow::Result<()> {
+        let Some(row) = entity::network::Entity::find_by_id(network_id)
+            .one(&self.conn)
+            .await?
+        else {
+            return Ok(());
+        };
+        let active = entity::network::ActiveModel {
+            id: Set(row.id),
+            times_connected: Set(row.times_connected + 1),
+            last_seen: Set(Utc::now()),
+            ..Default::default()
+        };
+        active.update(&self.conn).await?;
+        Ok(())
+    }
+
+    pub async fn all_networks(&self) -> anyhow::Result<Vec<NetworkInfo>> {
+        let rows = entity::network::Entity::find().all(&self.conn).await?;
+        Ok(rows.into_iter().map(row_to_network_info).collect())
+    }
+
+    pub async fn get_network(&self, id: &str) -> anyhow::Result<Option<NetworkInfo>> {
+        let row = entity::network::Entity::find_by_id(id)
+            .one(&self.conn)
+            .await?;
+        Ok(row.map(row_to_network_info))
+    }
+
+    /// Load hosts scoped to a specific network.
+    pub async fn hosts_for_network(&self, network_id: &str) -> anyhow::Result<Vec<HostInfo>> {
+        let hosts = entity::host::Entity::find()
+            .filter(entity::host::Column::NetworkId.eq(network_id))
+            .all(&self.conn)
+            .await?;
+
+        let macs: Vec<String> = hosts.iter().map(|h| h.mac.clone()).collect();
+        let all_services = if macs.is_empty() {
+            vec![]
+        } else {
+            entity::service::Entity::find()
+                .filter(entity::service::Column::HostMac.is_in(macs))
+                .all(&self.conn)
+                .await?
+        };
+
+        let mut services_by_mac: std::collections::HashMap<String, Vec<entity::service::Model>> =
+            std::collections::HashMap::with_capacity(hosts.len());
+        for svc in all_services {
+            services_by_mac
+                .entry(svc.host_mac.clone())
+                .or_default()
+                .push(svc);
+        }
+
+        Ok(hosts
+            .iter()
+            .map(|host| {
+                let services = services_by_mac
+                    .get(&host.mac)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                row_to_host_info(host, services)
+            })
+            .collect())
+    }
+
     // ── Bulk restore ───────────────────────────────────────────────────
 
     /// Load all persisted state. Called once at daemon startup.
@@ -509,6 +620,26 @@ fn row_to_wifi_info(row: entity::wifi_network::Model) -> WifiInfo {
     }
 }
 
+fn row_to_network_info(row: entity::network::Model) -> NetworkInfo {
+    if let Some(ref doc) = row.document_json {
+        if let Ok(net) = serde_json::from_str::<NetworkInfo>(doc) {
+            return net;
+        }
+    }
+    NetworkInfo {
+        id: row.id,
+        ssid: row.ssid,
+        gateway_mac: row.gateway_mac,
+        gateway_ip: row.gateway_ip,
+        subnet_cidr: row.subnet_cidr,
+        subnet_mask: row.subnet_mask,
+        interface: row.interface,
+        times_connected: row.times_connected as u32,
+        first_seen: row.first_seen.with_timezone(&Utc),
+        last_seen: row.last_seen.with_timezone(&Utc),
+    }
+}
+
 // ── StorageBackend trait implementation ─────────────────────────────────────
 
 #[async_trait::async_trait]
@@ -543,6 +674,14 @@ impl StorageBackend for Database {
 
     async fn prune_events(&self, ttl_secs: u64) -> anyhow::Result<u64> {
         self.prune_events(ttl_secs).await
+    }
+
+    async fn upsert_network(&self, network: &NetworkInfo) -> anyhow::Result<()> {
+        self.upsert_network(network).await
+    }
+
+    async fn hosts_for_network(&self, network_id: &str) -> anyhow::Result<Vec<HostInfo>> {
+        self.hosts_for_network(network_id).await
     }
 }
 

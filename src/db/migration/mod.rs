@@ -5,6 +5,7 @@ mod m20250313_000002_add_network_id;
 mod m20250314_000003_create_event_log;
 mod m20250315_000004_host_document;
 mod m20250315_000005_interface_wifi_documents;
+mod m20250316_000006_create_networks;
 
 pub struct Migrator;
 
@@ -17,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20250314_000003_create_event_log::Migration),
             Box::new(m20250315_000004_host_document::Migration),
             Box::new(m20250315_000005_interface_wifi_documents::Migration),
+            Box::new(m20250316_000006_create_networks::Migration),
         ]
     }
 }

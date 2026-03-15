@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::model::{DeltaEvent, HostInfo, InterfaceInfo, WifiInfo};
+use crate::model::{DeltaEvent, HostInfo, InterfaceInfo, NetworkInfo, WifiInfo};
 
 // ── Command execution ──────────────────────────────────────────────────────
 
@@ -164,6 +164,8 @@ pub trait StorageBackend: Send + Sync {
     async fn load_all(&self) -> anyhow::Result<(Vec<InterfaceInfo>, Vec<HostInfo>, Vec<WifiInfo>)>;
     async fn append_event(&self, event: &DeltaEvent) -> anyhow::Result<()>;
     async fn prune_events(&self, ttl_secs: u64) -> anyhow::Result<u64>;
+    async fn upsert_network(&self, network: &NetworkInfo) -> anyhow::Result<()>;
+    async fn hosts_for_network(&self, network_id: &str) -> anyhow::Result<Vec<HostInfo>>;
 }
 
 // ── Gateway / DNS providers ────────────────────────────────────────────────
@@ -348,6 +350,19 @@ pub mod mocks {
 
         async fn prune_events(&self, _ttl_secs: u64) -> anyhow::Result<u64> {
             Ok(0)
+        }
+
+        async fn upsert_network(&self, _network: &NetworkInfo) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn hosts_for_network(&self, network_id: &str) -> anyhow::Result<Vec<HostInfo>> {
+            let hosts = self.hosts.lock().unwrap();
+            Ok(hosts
+                .values()
+                .filter(|h| h.network_id == network_id)
+                .cloned()
+                .collect())
         }
     }
 
