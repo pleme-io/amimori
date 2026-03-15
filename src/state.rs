@@ -114,8 +114,27 @@ impl StateEngine {
                 }
             }
 
+            let cidr = iface.cidr();
             let hosts = db.hosts_for_network(&net_id).await?;
             for host in hosts {
+                // Validate that host IPs belong to this interface's subnet.
+                // Garbage data from pre-subnet-validation era may have IPs from
+                // other networks tagged with this network_id.
+                if let Some(ref cidr) = cidr {
+                    let in_subnet = host.addresses.iter().any(|a| {
+                        if let std::net::IpAddr::V4(v4) = a {
+                            Self::ipv4_in_cidr(*v4, cidr)
+                        } else {
+                            true
+                        }
+                    });
+                    if !in_subnet && !host.addresses.is_empty() {
+                        // Clean up the bad DB row
+                        let _ = db.remove_host(&host.mac).await;
+                        rejected += 1;
+                        continue;
+                    }
+                }
                 if state.insert_host(host.mac.clone(), host) {
                     loaded += 1;
                 } else {
