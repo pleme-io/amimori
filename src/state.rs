@@ -97,11 +97,24 @@ impl StateEngine {
             .collect();
         active_networks.dedup();
 
-        // Load hosts scoped to active networks only.
+        // Register active networks and load their hosts.
         let mut rejected = 0usize;
         let mut loaded = 0usize;
-        for net_id in &active_networks {
-            let hosts = db.hosts_for_network(net_id).await?;
+        for iface in interfaces.iter().filter(|i| i.is_up) {
+            let net_id = iface.network_id();
+            if net_id.is_empty() {
+                continue;
+            }
+
+            // Ensure this network has a record in the DB.
+            let net_info = crate::model::NetworkInfo::from_interface(iface, "");
+            if let Some(info) = net_info {
+                if let Err(e) = db.upsert_network(&info).await {
+                    tracing::warn!(error = %e, "failed to register network on restore");
+                }
+            }
+
+            let hosts = db.hosts_for_network(&net_id).await?;
             for host in hosts {
                 if state.insert_host(host.mac.clone(), host) {
                     loaded += 1;
