@@ -689,6 +689,10 @@ impl StateEngine {
     /// Clear in-memory hosts for an interface (network transition).
     /// Hosts remain in the database for historical querying — only the live
     /// in-memory view is reset so the new network starts fresh.
+    ///
+    /// Does NOT emit `HostRemoved` events — the hosts aren't gone, they're
+    /// just on a different network. `HostRemoved` is reserved for hosts that
+    /// genuinely disappear from the network they're on (pruned after TTL).
     async fn clear_hosts_on_interface(&self, interface: &str) -> anyhow::Result<usize> {
         // Collect keys first — can't hold DashMap iterator across await points.
         let removed: Vec<String> = self
@@ -706,7 +710,6 @@ impl StateEngine {
                     self.state.ip_to_mac.remove(addr);
                 }
             }
-            self.emit(Change::HostRemoved { mac: mac.clone() }).await;
         }
 
         Ok(removed.len())
@@ -1812,7 +1815,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Should see: HostRemoved + NetworkChanged + InterfaceChanged
+        // Should see: NetworkChanged + InterfaceChanged (but NOT HostRemoved —
+        // hosts aren't gone, they're just on a different network).
         let mut found_network_changed = false;
         let mut found_host_removed = false;
         while let Ok(event) = rx.try_recv() {
@@ -1829,7 +1833,7 @@ mod tests {
             }
         }
         assert!(found_network_changed, "should emit NetworkChanged");
-        assert!(found_host_removed, "should emit HostRemoved for cleared host");
+        assert!(!found_host_removed, "should NOT emit HostRemoved on network transition");
     }
 
     #[tokio::test]
