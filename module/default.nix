@@ -12,7 +12,7 @@
   ...
 }:
 with lib; let
-  inherit (hmHelpers) mkMcpOptions mkMcpServerEntry;
+  inherit (hmHelpers) mkMcpOptions mkMcpServerEntry mkAnvilRegistration;
   mcpCfg = config.services.amimori.mcp;
 
   # gRPC connection settings — used by the MCP server to reach the daemon
@@ -37,10 +37,23 @@ in {
     };
   };
 
-  config = mkIf mcpCfg.enable {
-    services.amimori.mcp.serverEntry = mkMcpServerEntry {
-      command = "${mcpCfg.package}/bin/amimori";
+  config = mkIf mcpCfg.enable (mkMerge [
+    # Self-register with anvil (primary path)
+    (mkAnvilRegistration {
+      name = "amimori";
+      command = "amimori";
+      package = mcpCfg.package;
       env.AMIMORI_GRPC_URL = "http://${grpcCfg.address}:${toString grpcCfg.port}";
-    };
-  };
+      description = "Network profiler and topology";
+      scopes = mcpCfg.scopes;
+    })
+
+    # Deprecated: serverEntry (kept for backward compatibility)
+    {
+      services.amimori.mcp.serverEntry = mkMcpServerEntry {
+        command = "${mcpCfg.package}/bin/amimori";
+        env.AMIMORI_GRPC_URL = "http://${grpcCfg.address}:${toString grpcCfg.port}";
+      };
+    }
+  ]);
 }
