@@ -37,23 +37,24 @@ in {
     };
   };
 
-  config = mkIf mcpCfg.enable (mkMerge [
-    # Self-register with anvil (primary path)
+  config = mkMerge [
+    # Self-register with anvil unconditionally — enable flag controls activation.
     (mkAnvilRegistration {
       name = "amimori";
       command = "amimori";
       package = mcpCfg.package;
+      enable = mcpCfg.enable;
       env.AMIMORI_GRPC_URL = "http://${grpcCfg.address}:${toString grpcCfg.port}";
       description = "Network profiler and topology";
       scopes = mcpCfg.scopes;
     })
 
     # Deprecated: serverEntry (kept for backward compatibility)
-    {
+    (mkIf mcpCfg.enable {
       services.amimori.mcp.serverEntry = mkMcpServerEntry {
         command = "${mcpCfg.package}/bin/amimori";
         env.AMIMORI_GRPC_URL = "http://${grpcCfg.address}:${toString grpcCfg.port}";
       };
-    }
-  ]);
+    })
+  ];
 }
