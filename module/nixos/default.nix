@@ -81,34 +81,34 @@ in {
     };
 
     grpc = {
-      address = mkOption { type = types.str; default = "127.0.0.1"; };
-      port = mkOption { type = types.int; default = 50051; };
+      address = mkOption { type = types.str; default = "127.0.0.1"; description = "gRPC listen address for MCP queries."; };
+      port = mkOption { type = types.int; default = 50051; description = "gRPC listen port for MCP queries."; };
     };
 
     collectors = {
       arp = {
-        enable = mkOption { type = types.bool; default = true; };
-        interval = mkOption { type = types.int; default = 5; };
-        maxFailures = mkOption { type = types.int; default = 10; };
+        enable = mkOption { type = types.bool; default = true; description = "Enable ARP table polling for host discovery."; };
+        interval = mkOption { type = types.int; default = 5; description = "ARP poll interval in seconds."; };
+        maxFailures = mkOption { type = types.int; default = 10; description = "Consecutive failures before disabling ARP collector."; };
       };
       interface = {
-        enable = mkOption { type = types.bool; default = true; };
-        interval = mkOption { type = types.int; default = 5; };
-        maxFailures = mkOption { type = types.int; default = 10; };
+        enable = mkOption { type = types.bool; default = true; description = "Enable network interface monitoring."; };
+        interval = mkOption { type = types.int; default = 5; description = "Interface poll interval in seconds."; };
+        maxFailures = mkOption { type = types.int; default = 10; description = "Consecutive failures before disabling interface collector."; };
       };
       wifi = {
-        enable = mkOption { type = types.bool; default = false; description = "WiFi scanning (macOS only, disabled by default on NixOS)"; };
-        interval = mkOption { type = types.int; default = 15; };
-        maxFailures = mkOption { type = types.int; default = 10; };
+        enable = mkOption { type = types.bool; default = false; description = "WiFi scanning (macOS only, disabled by default on NixOS)."; };
+        interval = mkOption { type = types.int; default = 15; description = "WiFi scan interval in seconds."; };
+        maxFailures = mkOption { type = types.int; default = 10; description = "Consecutive failures before disabling WiFi collector."; };
       };
       nmap = {
-        enable = mkOption { type = types.bool; default = true; };
-        interval = mkOption { type = types.int; default = 60; };
-        package = mkOption { type = types.package; default = pkgs.nmap; };
-        timeout = mkOption { type = types.int; default = 120; };
-        serviceDetection = mkOption { type = types.bool; default = false; };
-        subnets = mkOption { type = types.listOf types.str; default = []; };
-        maxFailures = mkOption { type = types.int; default = 3; };
+        enable = mkOption { type = types.bool; default = true; description = "Enable nmap-based service discovery."; };
+        interval = mkOption { type = types.int; default = 60; description = "Nmap scan interval in seconds."; };
+        package = mkOption { type = types.package; default = pkgs.nmap; description = "Nmap package to use."; };
+        timeout = mkOption { type = types.int; default = 120; description = "Per-scan timeout in seconds."; };
+        serviceDetection = mkOption { type = types.bool; default = false; description = "Service version detection (-sV). Disabled by default on NixOS for performance."; };
+        subnets = mkOption { type = types.listOf types.str; default = []; description = "Subnets to scan. Empty = auto-detect from interfaces."; };
+        maxFailures = mkOption { type = types.int; default = 3; description = "Consecutive failures before disabling nmap collector."; };
       };
     };
 
@@ -116,25 +116,25 @@ in {
       dbPath = mkOption {
         type = types.str;
         default = "/var/lib/amimori/state.db";
-        description = "Path to SQLite database";
+        description = "Path to SQLite database for host/event storage.";
       };
-      eventBufferSize = mkOption { type = types.int; default = 10000; };
+      eventBufferSize = mkOption { type = types.int; default = 10000; description = "Maximum events buffered before flush."; };
       retention = {
-        hostTtl = mkOption { type = types.int; default = 86400; };
-        pruneInterval = mkOption { type = types.int; default = 300; };
+        hostTtl = mkOption { type = types.int; default = 86400; description = "Host TTL in seconds before pruning (default: 24h)."; };
+        pruneInterval = mkOption { type = types.int; default = 300; description = "Interval between prune cycles in seconds (default: 5min)."; };
       };
     };
 
     filters = {
-      excludeMacs = mkOption { type = types.listOf types.str; default = []; };
-      excludeIps = mkOption { type = types.listOf types.str; default = []; };
-      excludeInterfaces = mkOption { type = types.listOf types.str; default = []; };
-      includeVendors = mkOption { type = types.listOf types.str; default = []; };
+      excludeMacs = mkOption { type = types.listOf types.str; default = []; description = "MAC addresses to exclude from monitoring."; };
+      excludeIps = mkOption { type = types.listOf types.str; default = []; description = "IP addresses to exclude from monitoring."; };
+      excludeInterfaces = mkOption { type = types.listOf types.str; default = []; description = "Network interfaces to exclude from monitoring."; };
+      includeVendors = mkOption { type = types.listOf types.str; default = []; description = "Vendor prefixes to include (empty = all vendors)."; };
     };
 
     logging = {
-      level = mkOption { type = types.str; default = "info"; };
-      format = mkOption { type = types.str; default = "text"; };
+      level = mkOption { type = types.str; default = "info"; description = "Log level (trace, debug, info, warn, error)."; };
+      format = mkOption { type = types.str; default = "text"; description = "Log format (text or json)."; };
     };
   };
 
